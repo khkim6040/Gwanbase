@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 프로젝트 개요
 
 **Gwanbase** — Kotlin으로 관계형 데이터베이스를 밑바닥부터 구현하는 학습용 프로젝트.
-퍼블릭 GitHub 레포지토리로 관리하며, DB Internals 학습 + 스펙 관리가 목적이다.
+퍼블릭 GitHub 레포지토리로 관리하며, DB Internals 학습이 목적이다.
 
 ## 핵심 원칙
 
