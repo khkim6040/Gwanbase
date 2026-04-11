@@ -145,6 +145,62 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
         return (0 until keyCount).map { i -> readLeafKey(i) to readLeafValue(i) }
     }
 
+    // --- Internal node operations ---
+
+    /**
+     * 내부 노드에 (separator key, childPageId) 항목을 삽입한다.
+     * 슬롯 디렉터리는 키 오름차순으로 유지된다.
+     *
+     * 규약: slot[i].childPageId는 key < slot[i].key를 만족하는 서브트리.
+     * 가장 큰 키 이상의 영역은 [rightmostChildPageId]가 담당한다.
+     *
+     * B+Tree의 separator key는 유일해야 하므로 동일 키 재삽입은 허용하지 않는다.
+     * 공간이 부족하면 false를 반환한다.
+     */
+    fun insertInternalEntry(key: ByteArray, childPageId: Int): Boolean {
+        check(!isLeaf) { "insertInternalEntry는 내부 노드에만 호출할 수 있다" }
+
+        val recordSize = INTERNAL_RECORD_OVERHEAD + key.size
+        val (insertPos, matched) = binarySearchInternalSlot(key)
+        check(!matched) {
+            "내부 노드 separator key 중복: ${String(key, Charsets.UTF_8)}"
+        }
+
+        val required = recordSize + SLOT_ENTRY_SIZE
+        if (freeSpaceTop() < required) return false
+
+        val newRecordOffset = freeSpaceOffset - recordSize
+        writeInternalRecord(newRecordOffset, key, childPageId)
+
+        shiftSlotsRight(insertPos)
+        writeSlot(insertPos, newRecordOffset, recordSize)
+
+        setKeyCount(keyCount + 1)
+        freeSpaceOffset = newRecordOffset
+        return true
+    }
+
+    /**
+     * 내부 노드에서 [key]를 포함하는 자식 페이지 ID를 반환한다.
+     *
+     * 알고리즘: slot 배열에 대해 upper_bound([key])를 구한다.
+     * 즉 가장 작은 i에서 slot[i].key > key인 i를 찾는다.
+     * - 그런 i가 존재하면 slot[i].childPageId를 반환
+     * - 아니면(키가 모든 separator 이상) [rightmostChildPageId]를 반환
+     */
+    fun findChild(key: ByteArray): Int {
+        check(!isLeaf) { "findChild는 내부 노드에만 호출할 수 있다" }
+
+        var lo = 0
+        var hi = keyCount
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            val cmp = compareKeysUnsigned(readInternalKey(mid), key)
+            if (cmp > 0) hi = mid else lo = mid + 1
+        }
+        return if (lo < keyCount) readInternalChild(lo) else rightmostChildPageId
+    }
+
     // --- Private helpers ---
 
     /** 슬롯 디렉터리 상단에서 남는 free space (바이트) */
@@ -187,6 +243,44 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
         val out = ByteArray(valueLen)
         for (i in 0 until valueLen) out[i] = buffer.get(valueStart + 2 + i)
         return out
+    }
+
+    // --- Internal node record helpers ---
+
+    private fun writeInternalRecord(recordOffset: Int, key: ByteArray, childPageId: Int) {
+        buffer.putShort(recordOffset, key.size.toShort())
+        for (i in key.indices) buffer.put(recordOffset + 2 + i, key[i])
+        buffer.putInt(recordOffset + 2 + key.size, childPageId)
+    }
+
+    private fun readInternalKey(slotIndex: Int): ByteArray {
+        val recordOffset = getSlotRecordOffset(slotIndex)
+        val keyLen = buffer.getShort(recordOffset).toInt() and 0xFFFF
+        val out = ByteArray(keyLen)
+        for (i in 0 until keyLen) out[i] = buffer.get(recordOffset + 2 + i)
+        return out
+    }
+
+    private fun readInternalChild(slotIndex: Int): Int {
+        val recordOffset = getSlotRecordOffset(slotIndex)
+        val keyLen = buffer.getShort(recordOffset).toInt() and 0xFFFF
+        return buffer.getInt(recordOffset + 2 + keyLen)
+    }
+
+    /** 내부 노드 슬롯에 대한 이진 탐색 (일치/삽입 위치) */
+    private fun binarySearchInternalSlot(key: ByteArray): Pair<Int, Boolean> {
+        var lo = 0
+        var hi = keyCount
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            val cmp = compareKeysUnsigned(readInternalKey(mid), key)
+            when {
+                cmp < 0 -> lo = mid + 1
+                cmp > 0 -> hi = mid
+                else -> return mid to true
+            }
+        }
+        return lo to false
     }
 
     /**
@@ -242,6 +336,9 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
 
         /** 리프 레코드 고정 오버헤드: keyLen(2) + valueLen(2) */
         const val LEAF_RECORD_OVERHEAD: Int = 4
+
+        /** 내부 노드 레코드 고정 오버헤드: keyLen(2) + childPageId(4) */
+        const val INTERNAL_RECORD_OVERHEAD: Int = 6
 
         private const val NODE_TYPE_INTERNAL = 0
         private const val NODE_TYPE_LEAF = 1

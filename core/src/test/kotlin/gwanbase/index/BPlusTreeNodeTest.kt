@@ -151,4 +151,37 @@ class BPlusTreeNodeTest {
         node.keyCount shouldBe 1
         node.findValue("apple".toByteArray()) shouldBe "green".toByteArray()
     }
+
+    @Test
+    fun `빈 내부 노드에서 findChild는 rightmostChildPageId를 반환한다`() {
+        val node = BPlusTreeNode(newPageBuffer())
+        node.initInternal(parentPageId = -1, rightmostChildPageId = 999)
+
+        node.findChild("any".toByteArray()) shouldBe 999
+    }
+
+    @Test
+    fun `내부 노드에 (key, child) 항목을 삽입한 후 findChild가 범위에 맞는 자식을 반환한다`() {
+        val node = BPlusTreeNode(newPageBuffer())
+        node.initInternal(parentPageId = -1, rightmostChildPageId = 999)
+
+        // 규약: slot[i].child는 key < slot[i].key인 서브트리.
+        //   (-inf, banana) → 10
+        //   [banana, date) → 20
+        //   [date,  fig)   → 30
+        //   [fig,  +inf)   → 999 (rightmost)
+        // 삽입 순서는 정렬과 다르게 한다.
+        node.insertInternalEntry("date".toByteArray(), 20).shouldBeTrue()
+        node.insertInternalEntry("banana".toByteArray(), 10).shouldBeTrue()
+        node.insertInternalEntry("fig".toByteArray(), 30).shouldBeTrue()
+
+        node.keyCount shouldBe 3
+        node.findChild("apple".toByteArray()) shouldBe 10
+        node.findChild("banana".toByteArray()) shouldBe 20
+        node.findChild("cherry".toByteArray()) shouldBe 20
+        node.findChild("date".toByteArray()) shouldBe 30
+        node.findChild("elderberry".toByteArray()) shouldBe 30
+        node.findChild("fig".toByteArray()) shouldBe 999
+        node.findChild("grape".toByteArray()) shouldBe 999
+    }
 }
