@@ -84,6 +84,31 @@ class BPlusTree internal constructor(
     }
 
     /**
+     * [key]를 제거한다 (Phase 1 lazy delete).
+     *
+     * 해당 리프에서 슬롯 엔트리만 제거하며 underflow/merge/rebalance는
+     * 구현하지 않는다. 제거된 레코드는 dead space가 된다.
+     *
+     * @return 키가 존재하여 제거되었으면 true, 없었으면 false
+     */
+    fun delete(key: ByteArray): Boolean {
+        val path = findLeafPath(key)
+        val leafPageId = path.last()
+
+        val page = bpm.fetchPage(leafPageId) ?: error("leaf not found: $leafPageId")
+        var dirty = false
+        try {
+            val leaf = BPlusTreeNode(page.data)
+            check(leaf.isLeaf) { "탐색 결과가 리프가 아니다: $leafPageId" }
+            val removed = leaf.deleteLeafEntry(key)
+            dirty = removed
+            return removed
+        } finally {
+            bpm.unpinPage(leafPageId, isDirty = dirty)
+        }
+    }
+
+    /**
      * 루트에서 리프까지의 페이지 ID 경로를 반환한다.
      * 리스트의 마지막 원소가 리프이고, 그 이전은 조상 내부 노드들이다.
      * 탐색 과정에서 페이지는 즉시 unpin한다.

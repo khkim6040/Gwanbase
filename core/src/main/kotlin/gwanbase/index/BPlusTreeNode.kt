@@ -145,6 +145,31 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
         return (0 until keyCount).map { i -> readLeafKey(i) to readLeafValue(i) }
     }
 
+    /**
+     * 리프에서 [key]에 해당하는 슬롯을 제거한다 (lazy delete).
+     *
+     * 슬롯 디렉터리에서 엔트리를 제거하고 이후 슬롯을 왼쪽으로 한 칸 당긴다.
+     * 레코드 데이터는 page 내에 남아 dead space가 되며 compaction은 구현하지 않는다.
+     *
+     * @return 해당 키가 존재하여 제거되었으면 true, 없었으면 false
+     */
+    fun deleteLeafEntry(key: ByteArray): Boolean {
+        check(isLeaf) { "deleteLeafEntry는 리프 노드에만 호출할 수 있다" }
+
+        val (idx, matched) = binarySearchLeafSlot(key)
+        if (!matched) return false
+
+        // 슬롯 [idx+1 .. keyCount-1]을 왼쪽으로 한 칸(SLOT_ENTRY_SIZE) 이동
+        val src = slotEntryOffset(idx + 1)
+        val end = slotEntryOffset(keyCount)
+        for (i in src until end) {
+            buffer.put(i - SLOT_ENTRY_SIZE, buffer.get(i))
+        }
+
+        setKeyCount(keyCount - 1)
+        return true
+    }
+
     /** 내부 노드에 저장된 모든 (key, childPageId)를 키 오름차순으로 반환 */
     fun internalEntries(): List<Pair<ByteArray, Int>> {
         check(!isLeaf) { "internalEntries는 내부 노드에만 호출할 수 있다" }

@@ -2,6 +2,8 @@ package gwanbase.index
 
 import gwanbase.storage.BufferPoolManager
 import gwanbase.storage.DiskManager
+import io.kotest.matchers.booleans.shouldBeFalse
+import io.kotest.matchers.booleans.shouldBeTrue
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.AfterEach
@@ -105,6 +107,56 @@ class BPlusTreeTest {
         }
         for (i in 0 until n) {
             tree.search(formatKey(i)) shouldBe formatValue(i)
+        }
+    }
+
+    @Test
+    fun `delete 후 같은 키를 search하면 null을 반환한다`() {
+        tree.insert("apple".toByteArray(), "red".toByteArray())
+        tree.insert("banana".toByteArray(), "yellow".toByteArray())
+
+        tree.delete("apple".toByteArray()).shouldBeTrue()
+
+        tree.search("apple".toByteArray()).shouldBeNull()
+        tree.search("banana".toByteArray()) shouldBe "yellow".toByteArray()
+    }
+
+    @Test
+    fun `존재하지 않는 키를 delete하면 false를 반환한다`() {
+        tree.insert("apple".toByteArray(), "red".toByteArray())
+
+        tree.delete("nonexistent".toByteArray()).shouldBeFalse()
+        tree.search("apple".toByteArray()) shouldBe "red".toByteArray()
+    }
+
+    @Test
+    fun `delete된 키를 다시 insert하면 새 값이 조회된다`() {
+        tree.insert("apple".toByteArray(), "red".toByteArray())
+        tree.delete("apple".toByteArray())
+        tree.insert("apple".toByteArray(), "green".toByteArray())
+
+        tree.search("apple".toByteArray()) shouldBe "green".toByteArray()
+    }
+
+    @Test
+    fun `split이 발생한 트리에서도 delete가 올바르게 동작한다`() {
+        // split이 확실히 일어나도록 500건 삽입
+        val n = 500
+        for (i in 0 until n) {
+            tree.insert(formatKey(i), formatValue(i))
+        }
+        // 짝수 인덱스 키를 모두 삭제
+        for (i in 0 until n step 2) {
+            tree.delete(formatKey(i)).shouldBeTrue()
+        }
+        // 짝수는 null, 홀수는 여전히 조회 가능
+        for (i in 0 until n) {
+            val result = tree.search(formatKey(i))
+            if (i % 2 == 0) {
+                result.shouldBeNull()
+            } else {
+                result shouldBe formatValue(i)
+            }
         }
     }
 
