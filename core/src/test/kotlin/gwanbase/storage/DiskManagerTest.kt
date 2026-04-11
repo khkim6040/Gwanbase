@@ -51,6 +51,28 @@ class DiskManagerTest {
     }
 
     @Test
+    fun `readPage는 EOF에서도 PAGE_SIZE 버퍼를 반환`() {
+        // 빈 파일 상태에서 존재하지 않는 페이지를 읽어도
+        // 페이지 I/O 계약(position=0, limit=PAGE_SIZE, 나머지 0)을 지켜야 한다.
+        val buffer = dm.readPage(0)
+        buffer.position() shouldBe 0
+        buffer.limit() shouldBe DiskManager.PAGE_SIZE
+        buffer.remaining() shouldBe DiskManager.PAGE_SIZE
+        // 읽지 못한 영역은 0으로 채워져 있다
+        for (i in 0 until DiskManager.PAGE_SIZE) {
+            buffer.get(i) shouldBe 0.toByte()
+        }
+    }
+
+    @Test
+    fun `allocatePage 이후 readPage는 전체 PAGE_SIZE 반환`() {
+        val pageId = dm.allocatePage()
+        val buffer = dm.readPage(pageId)
+        buffer.position() shouldBe 0
+        buffer.limit() shouldBe DiskManager.PAGE_SIZE
+    }
+
+    @Test
     fun `여러 페이지 독립적으로 읽기 쓰기`() {
         val pages = (0 until 10).map { i ->
             val pageId = dm.allocatePage()

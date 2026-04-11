@@ -49,9 +49,14 @@ class SlottedPage(private val buffer: ByteBuffer) {
     /**
      * 레코드를 삽입하고 슬롯 ID를 반환한다.
      * 공간이 부족하면 -1을 반환한다.
+     *
+     * 삭제된 슬롯을 재사용할 수 있으면 슬롯 디렉터리 크기가 늘어나지 않으므로,
+     * 필요 공간은 레코드 크기만으로 계산한다. 그렇지 않으면 슬롯 엔트리 1개 분량을
+     * 추가로 확보해야 한다.
      */
     fun insertRecord(record: ByteArray): Int {
-        val requiredSpace = record.size + SLOT_ENTRY_SIZE
+        val reusableSlot = findDeletedSlot()
+        val requiredSpace = if (reusableSlot != null) record.size else record.size + SLOT_ENTRY_SIZE
         if (freeSpace < requiredSpace) return -1
 
         // 레코드를 페이지 끝에서부터 역방향으로 배치
@@ -60,8 +65,7 @@ class SlottedPage(private val buffer: ByteBuffer) {
         buffer.put(record)
         freeSpaceOffset = recordOffset
 
-        // 삭제된 슬롯 재사용 시도
-        val slotId = findDeletedSlot() ?: run {
+        val slotId = reusableSlot ?: run {
             val newSlotId = slotCount
             slotCount = newSlotId + 1
             newSlotId

@@ -127,9 +127,16 @@ class BufferPoolManager(
         return true
     }
 
-    /** 모든 페이지를 디스크에 기록 */
+    /**
+     * 모든 페이지를 디스크에 기록한다.
+     *
+     * 다른 public API와 락 정책을 일치시키기 위해 @Synchronized를 적용한다.
+     * (락을 잡지 않으면 순회 중 다른 스레드가 pageTable을 변경해 flush가 누락될 수 있다.)
+     */
+    @Synchronized
     fun flushAllPages() {
-        pageTable.keys.forEach { flushPage(it) }
+        // toList로 스냅샷을 만들어 내부 flushPage 호출 중 map 변경 가능성을 차단한다.
+        pageTable.keys.toList().forEach { flushPage(it) }
         diskManager.sync()
     }
 

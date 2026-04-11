@@ -76,6 +76,21 @@ class SlottedPageTest {
     }
 
     @Test
+    fun `삭제 슬롯 재사용 시 슬롯 엔트리 공간 재할당이 필요 없어야 한다`() {
+        // 레코드 삽입 후 삭제 → 슬롯 1개가 DELETED 상태로 남는다.
+        val slot0 = slottedPage.insertRecord(ByteArray(100))
+        slottedPage.deleteRecord(slot0)
+
+        // 이 시점의 freeSpace에 정확히 맞는 레코드를 재삽입한다.
+        // 버그: freeSpace == record.size인데 requiredSpace를 record.size + SLOT_ENTRY_SIZE로
+        // 계산해 -1을 반환했다. 수정 후에는 삭제 슬롯을 재사용하므로 성공해야 한다.
+        val tight = ByteArray(slottedPage.freeSpace) { (it % 128).toByte() }
+        val reused = slottedPage.insertRecord(tight)
+        reused shouldBe slot0
+        slottedPage.getRecord(reused) shouldBe tight
+    }
+
+    @Test
     fun `공간 부족 시 -1 반환`() {
         // 페이지를 거의 다 채움
         val bigRecord = ByteArray(DiskManager.PAGE_SIZE / 2)
