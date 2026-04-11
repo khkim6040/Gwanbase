@@ -160,6 +160,60 @@ class BPlusTreeTest {
         }
     }
 
+    @Test
+    fun `scan은 start 이상 end 미만 범위를 키 오름차순으로 반환한다`() {
+        for (i in 0 until 20) {
+            tree.insert(formatKey(i), formatValue(i))
+        }
+
+        val result = tree.scan(formatKey(5), formatKey(15)).asSequence().toList()
+
+        result.size shouldBe 10
+        for ((idx, entry) in result.withIndex()) {
+            entry.first shouldBe formatKey(5 + idx)
+            entry.second shouldBe formatValue(5 + idx)
+        }
+    }
+
+    @Test
+    fun `scan은 리프 경계를 넘어 여러 리프에 걸친 범위도 반환한다`() {
+        val n = 1000
+        for (i in 0 until n) {
+            tree.insert(formatKey(i), formatValue(i))
+        }
+
+        val result = tree.scan(formatKey(100), formatKey(250)).asSequence().toList()
+
+        result.size shouldBe 150
+        for ((idx, entry) in result.withIndex()) {
+            entry.first shouldBe formatKey(100 + idx)
+        }
+    }
+
+    @Test
+    fun `scan의 start가 모든 키보다 작으면 전체에서 end 미만을 반환한다`() {
+        for (i in 0 until 10) {
+            tree.insert(formatKey(i), formatValue(i))
+        }
+
+        val result = tree.scan("aaaa".toByteArray(), formatKey(5)).asSequence().toList()
+
+        result.size shouldBe 5
+        result.first().first shouldBe formatKey(0)
+        result.last().first shouldBe formatKey(4)
+    }
+
+    @Test
+    fun `scan의 start가 모든 키보다 크면 빈 결과를 반환한다`() {
+        for (i in 0 until 10) {
+            tree.insert(formatKey(i), formatValue(i))
+        }
+
+        val result = tree.scan("zzzz".toByteArray(), "zzzzz".toByteArray()).asSequence().toList()
+
+        result shouldBe emptyList()
+    }
+
     private fun formatKey(i: Int): ByteArray = "key-%06d".format(i).toByteArray()
     private fun formatValue(i: Int): ByteArray = "value-%06d".format(i).toByteArray()
 }

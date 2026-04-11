@@ -84,6 +84,41 @@ class BPlusTree internal constructor(
     }
 
     /**
+     * [startKey] 이상 [endKey] 미만 범위의 (key, value) 쌍을 키 오름차순으로 반환한다.
+     *
+     * 구현은 leaf 체인을 따라가며 조건을 만족하는 엔트리만 lazy 하게 내보낸다.
+     * 각 leaf 단위로는 모든 엔트리를 힙 메모리에 복사해 가면서 페이지를
+     * 즉시 unpin 한다 (scan 도중 긴 pin 유지 방지).
+     */
+    fun scan(startKey: ByteArray, endKey: ByteArray): Iterator<Pair<ByteArray, ByteArray>> {
+        return sequence {
+            val path = findLeafPath(startKey)
+            var currentLeafId = path.last()
+
+            while (currentLeafId != BPlusTreeNode.INVALID_PAGE_ID) {
+                val page = bpm.fetchPage(currentLeafId) ?: error("leaf not found: $currentLeafId")
+                val entries: List<Pair<ByteArray, ByteArray>>
+                val nextLeaf: Int
+                try {
+                    val leaf = BPlusTreeNode(page.data)
+                    check(leaf.isLeaf) { "scan 중 내부 노드를 만났다: $currentLeafId" }
+                    entries = leaf.leafEntries()
+                    nextLeaf = leaf.nextLeafPageId
+                } finally {
+                    bpm.unpinPage(currentLeafId, isDirty = false)
+                }
+
+                for ((k, v) in entries) {
+                    if (compareUnsigned(k, startKey) < 0) continue
+                    if (compareUnsigned(k, endKey) >= 0) return@sequence
+                    yield(k to v)
+                }
+                currentLeafId = nextLeaf
+            }
+        }.iterator()
+    }
+
+    /**
      * [key]를 제거한다 (Phase 1 lazy delete).
      *
      * 해당 리프에서 슬롯 엔트리만 제거하며 underflow/merge/rebalance는
