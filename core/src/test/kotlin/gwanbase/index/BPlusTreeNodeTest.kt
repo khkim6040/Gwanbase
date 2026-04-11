@@ -161,6 +161,62 @@ class BPlusTreeNodeTest {
     }
 
     @Test
+    fun `splitLeaf는 절반을 새 노드로 옮기고 오른쪽 노드의 첫 키를 promote 키로 반환한다`() {
+        val left = BPlusTreeNode(newPageBuffer())
+        left.initLeaf(parentPageId = 50)
+        left.nextLeafPageId = 99 // 기존 오른쪽 이웃
+        val right = BPlusTreeNode(newPageBuffer())
+        right.initLeaf(parentPageId = 50)
+
+        listOf("a", "b", "c", "d", "e", "f").forEach {
+            left.insertLeafEntry(it.toByteArray(), "v-$it".toByteArray())
+        }
+
+        val promoteKey = left.splitLeaf(newRightNode = right, newRightPageId = 7)
+
+        // 6건이 3/3으로 분할된다 (대략 절반)
+        left.leafEntries().map { String(it.first) } shouldBe listOf("a", "b", "c")
+        right.leafEntries().map { String(it.first) } shouldBe listOf("d", "e", "f")
+        String(promoteKey) shouldBe "d"
+        // 리프 체인: left → right → (기존 오른쪽 이웃 99)
+        left.nextLeafPageId shouldBe 7
+        right.nextLeafPageId shouldBe 99
+        right.parentPageId shouldBe 50
+    }
+
+    @Test
+    fun `splitInternal은 중간 키를 promote하고 중간 자식을 왼쪽 rightmost로 이관한다`() {
+        val left = BPlusTreeNode(newPageBuffer())
+        left.initInternal(parentPageId = 1, rightmostChildPageId = 9999)
+        val right = BPlusTreeNode(newPageBuffer())
+        right.initInternal(parentPageId = 1, rightmostChildPageId = -1)
+
+        // 삽입: (banana, 10), (date, 20), (fig, 30), (mango, 40), (pear, 50)
+        //   slot[0]=(banana,10) slot[1]=(date,20) slot[2]=(fig,30) slot[3]=(mango,40) slot[4]=(pear,50)
+        //   rightmost=9999
+        listOf("banana" to 10, "date" to 20, "fig" to 30, "mango" to 40, "pear" to 50)
+            .forEach { (k, c) -> left.insertInternalEntry(k.toByteArray(), c).shouldBeTrue() }
+
+        val promoteKey = left.splitInternal(newRightNode = right)
+
+        // mid=2: 왼쪽 [banana(10), date(20)] + rightmost=30
+        // promote key = "fig"
+        // 오른쪽 [mango(40), pear(50)] + rightmost=9999
+        String(promoteKey) shouldBe "fig"
+        left.keyCount shouldBe 2
+        left.findChild("apple".toByteArray()) shouldBe 10
+        left.findChild("banana".toByteArray()) shouldBe 20
+        left.findChild("date".toByteArray()) shouldBe 30
+        left.findChild("elderberry".toByteArray()) shouldBe 30
+
+        right.keyCount shouldBe 2
+        right.findChild("lychee".toByteArray()) shouldBe 40
+        right.findChild("mango".toByteArray()) shouldBe 50
+        right.findChild("pear".toByteArray()) shouldBe 9999
+        right.findChild("quince".toByteArray()) shouldBe 9999
+    }
+
+    @Test
     fun `내부 노드에 (key, child) 항목을 삽입한 후 findChild가 범위에 맞는 자식을 반환한다`() {
         val node = BPlusTreeNode(newPageBuffer())
         node.initInternal(parentPageId = -1, rightmostChildPageId = 999)

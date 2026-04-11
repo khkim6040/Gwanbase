@@ -145,6 +145,85 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
         return (0 until keyCount).map { i -> readLeafKey(i) to readLeafValue(i) }
     }
 
+    // --- Split operations ---
+
+    /**
+     * 리프 노드를 두 개로 분할한다.
+     *
+     * 현재(왼쪽) 노드는 엔트리의 앞쪽 절반을 유지하고,
+     * [newRightNode]에는 뒤쪽 절반을 복사한다. 리프 체인
+     * (nextLeafPageId)도 자동으로 갱신된다.
+     *
+     * @param newRightNode 새로 할당된 빈 리프 노드 (이미 initLeaf 호출됨)
+     * @param newRightPageId newRightNode가 위치한 페이지 ID
+     *   (현재 노드의 nextLeafPageId를 이 값으로 업데이트한다)
+     * @return 새 오른쪽 노드의 첫 번째 키 (부모로 promote할 separator)
+     */
+    fun splitLeaf(newRightNode: BPlusTreeNode, newRightPageId: Int): ByteArray {
+        check(isLeaf) { "splitLeaf는 리프 노드에만 호출할 수 있다" }
+        check(newRightNode.isLeaf) { "splitLeaf의 대상 노드는 리프여야 한다" }
+        check(keyCount >= 2) { "splitLeaf는 최소 2개 엔트리가 필요하다" }
+
+        val entries = leafEntries()
+        val mid = entries.size / 2
+        val leftEntries = entries.subList(0, mid)
+        val rightEntries = entries.subList(mid, entries.size)
+
+        val origParent = parentPageId
+        val origNext = nextLeafPageId
+
+        // 왼쪽(현재) 노드를 리셋한 뒤 앞쪽 절반 재삽입
+        initLeaf(origParent)
+        nextLeafPageId = newRightPageId
+        for ((k, v) in leftEntries) insertLeafEntry(k, v)
+
+        // 오른쪽 노드 구성
+        newRightNode.parentPageId = origParent
+        newRightNode.nextLeafPageId = origNext
+        for ((k, v) in rightEntries) newRightNode.insertLeafEntry(k, v)
+
+        return rightEntries.first().first
+    }
+
+    /**
+     * 내부 노드를 두 개로 분할한다.
+     *
+     * 왼쪽(현재) 노드는 앞쪽 mid-1개 슬롯을 유지하고, slots[mid].child가
+     * 왼쪽의 새 rightmostChild가 된다. slots[mid].key는 부모로 promote되며
+     * 양쪽 어느 노드에도 남지 않는다 (B+Tree 내부 노드의 표준 split 규약).
+     * [newRightNode]는 slots[mid+1..n-1]와 원래 rightmostChild를 가져간다.
+     *
+     * @param newRightNode 새로 할당된 빈 내부 노드 (initInternal 호출됨)
+     * @return 부모로 promote할 separator 키
+     */
+    fun splitInternal(newRightNode: BPlusTreeNode): ByteArray {
+        check(!isLeaf) { "splitInternal은 내부 노드에만 호출할 수 있다" }
+        check(!newRightNode.isLeaf) { "splitInternal의 대상 노드는 내부 노드여야 한다" }
+        check(keyCount >= 2) { "splitInternal은 최소 2개 키가 필요하다" }
+
+        val pairs = (0 until keyCount).map { i -> readInternalKey(i) to readInternalChild(i) }
+        val origRightmost = rightmostChildPageId
+        val origParent = parentPageId
+
+        val mid = pairs.size / 2
+        val leftPairs = pairs.subList(0, mid)
+        val promoteKey = pairs[mid].first
+        val midChild = pairs[mid].second
+        val rightPairs = pairs.subList(mid + 1, pairs.size)
+
+        // 왼쪽(현재) 노드를 리셋한 뒤 앞쪽 절반 재구성.
+        // 왼쪽의 rightmostChild는 원래 slots[mid].child가 된다.
+        initInternal(parentPageId = origParent, rightmostChildPageId = midChild)
+        for ((k, c) in leftPairs) insertInternalEntry(k, c)
+
+        // 오른쪽 노드 구성: 뒤쪽 절반 + 원래 rightmost
+        newRightNode.parentPageId = origParent
+        newRightNode.rightmostChildPageId = origRightmost
+        for ((k, c) in rightPairs) newRightNode.insertInternalEntry(k, c)
+
+        return promoteKey
+    }
+
     // --- Internal node operations ---
 
     /**
