@@ -15,7 +15,7 @@ import java.nio.ByteOrder
  * 2       2     keyCount
  * 4       4     parentPageId
  * 8       4     nextLeafPageId       (leaf only, -1 for internal)
- * 12      4     rightmostChildPageId (internal only, -1 for leaf)
+ * 12      4     leftmostChildPageId (internal only, -1 for leaf)
  * 16      2     freeSpaceOffset      (record 영역의 가장 낮은 offset)
  * 18      ...   slot directory (각 4바이트: offset, length)
  *               ...free space...
@@ -53,10 +53,10 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
             buffer.putInt(OFFSET_NEXT_LEAF_PAGE_ID, value)
         }
 
-    var rightmostChildPageId: Int
-        get() = buffer.getInt(OFFSET_RIGHTMOST_CHILD_PAGE_ID)
+    var leftmostChildPageId: Int
+        get() = buffer.getInt(OFFSET_LEFTMOST_CHILD_PAGE_ID)
         set(value) {
-            buffer.putInt(OFFSET_RIGHTMOST_CHILD_PAGE_ID, value)
+            buffer.putInt(OFFSET_LEFTMOST_CHILD_PAGE_ID, value)
         }
 
     private var freeSpaceOffset: Int
@@ -76,15 +76,15 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
         setKeyCount(0)
         this.parentPageId = parentPageId
         this.nextLeafPageId = INVALID_PAGE_ID
-        buffer.putInt(OFFSET_RIGHTMOST_CHILD_PAGE_ID, INVALID_PAGE_ID)
+        buffer.putInt(OFFSET_LEFTMOST_CHILD_PAGE_ID, INVALID_PAGE_ID)
         freeSpaceOffset = PAGE_SIZE
     }
 
-    fun initInternal(parentPageId: Int, rightmostChildPageId: Int) {
+    fun initInternal(parentPageId: Int, leftmostChildPageId: Int) {
         buffer.put(OFFSET_NODE_TYPE, NODE_TYPE_INTERNAL.toByte())
         setKeyCount(0)
         this.parentPageId = parentPageId
-        this.rightmostChildPageId = rightmostChildPageId
+        this.leftmostChildPageId = leftmostChildPageId
         buffer.putInt(OFFSET_NEXT_LEAF_PAGE_ID, INVALID_PAGE_ID)
         freeSpaceOffset = PAGE_SIZE
     }
@@ -202,7 +202,7 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
         check(keyCount >= 2) { "splitInternal은 최소 2개 키가 필요하다" }
 
         val pairs = (0 until keyCount).map { i -> readInternalKey(i) to readInternalChild(i) }
-        val origRightmost = rightmostChildPageId
+        val origLeftmost = leftmostChildPageId
         val origParent = parentPageId
 
         val mid = pairs.size / 2
@@ -211,14 +211,14 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
         val midChild = pairs[mid].second
         val rightPairs = pairs.subList(mid + 1, pairs.size)
 
-        // 왼쪽(현재) 노드를 리셋한 뒤 앞쪽 절반 재구성.
-        // 왼쪽의 rightmostChild는 원래 slots[mid].child가 된다.
-        initInternal(parentPageId = origParent, rightmostChildPageId = midChild)
+        // 왼쪽(현재) 노드: 원래 leftmostChild 유지, 앞쪽 절반 슬롯 재구성.
+        initInternal(parentPageId = origParent, leftmostChildPageId = origLeftmost)
         for ((k, c) in leftPairs) insertInternalEntry(k, c)
 
-        // 오른쪽 노드 구성: 뒤쪽 절반 + 원래 rightmost
+        // 오른쪽 노드: leftmostChild는 원래 slots[mid].child가 된다 (promote로
+        // 빠진 키의 자식 포인터). 이후 뒤쪽 절반 슬롯을 채운다.
         newRightNode.parentPageId = origParent
-        newRightNode.rightmostChildPageId = origRightmost
+        newRightNode.leftmostChildPageId = midChild
         for ((k, c) in rightPairs) newRightNode.insertInternalEntry(k, c)
 
         return promoteKey
@@ -230,8 +230,8 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
      * 내부 노드에 (separator key, childPageId) 항목을 삽입한다.
      * 슬롯 디렉터리는 키 오름차순으로 유지된다.
      *
-     * 규약: slot[i].childPageId는 key < slot[i].key를 만족하는 서브트리.
-     * 가장 큰 키 이상의 영역은 [rightmostChildPageId]가 담당한다.
+     * 규약: slot[i].childPageId는 key ≥ slot[i].key인 서브트리를 담당한다.
+     * 가장 작은 키 영역(< slot[0].key)은 [leftmostChildPageId]가 담당한다.
      *
      * B+Tree의 separator key는 유일해야 하므로 동일 키 재삽입은 허용하지 않는다.
      * 공간이 부족하면 false를 반환한다.
@@ -262,10 +262,13 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
     /**
      * 내부 노드에서 [key]를 포함하는 자식 페이지 ID를 반환한다.
      *
-     * 알고리즘: slot 배열에 대해 upper_bound([key])를 구한다.
-     * 즉 가장 작은 i에서 slot[i].key > key인 i를 찾는다.
-     * - 그런 i가 존재하면 slot[i].childPageId를 반환
-     * - 아니면(키가 모든 separator 이상) [rightmostChildPageId]를 반환
+     * 규약: slot[i].child는 key ≥ slot[i].key인 서브트리를 담당한다.
+     * leftmostChild는 key < slot[0].key인 영역을 담당한다.
+     *
+     * 알고리즘:
+     * 1. upper_bound(key) = 가장 작은 i에서 slot[i].key > key
+     * 2. i == 0 ⇒ key < 모든 슬롯 키 ⇒ leftmostChild
+     * 3. 아니면 slot[i-1].child (key가 slot[i-1].key 이상, slot[i].key 미만)
      */
     fun findChild(key: ByteArray): Int {
         check(!isLeaf) { "findChild는 내부 노드에만 호출할 수 있다" }
@@ -277,7 +280,8 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
             val cmp = compareKeysUnsigned(readInternalKey(mid), key)
             if (cmp > 0) hi = mid else lo = mid + 1
         }
-        return if (lo < keyCount) readInternalChild(lo) else rightmostChildPageId
+        // lo는 upper_bound(key)
+        return if (lo == 0) leftmostChildPageId else readInternalChild(lo - 1)
     }
 
     // --- Private helpers ---
@@ -426,7 +430,7 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
         private const val OFFSET_KEY_COUNT = 2
         private const val OFFSET_PARENT_PAGE_ID = 4
         private const val OFFSET_NEXT_LEAF_PAGE_ID = 8
-        private const val OFFSET_RIGHTMOST_CHILD_PAGE_ID = 12
+        private const val OFFSET_LEFTMOST_CHILD_PAGE_ID = 12
         private const val OFFSET_FREE_SPACE_OFFSET = 16
 
         private const val PAGE_SIZE = DiskManager.PAGE_SIZE

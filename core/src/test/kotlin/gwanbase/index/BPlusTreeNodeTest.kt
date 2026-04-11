@@ -29,7 +29,7 @@ class BPlusTreeNodeTest {
     fun `빈 내부 노드 초기화 시 isLeaf는 false이고 keyCount는 0이다`() {
         val buffer = newPageBuffer()
         val node = BPlusTreeNode(buffer)
-        node.initInternal(parentPageId = -1, rightmostChildPageId = -1)
+        node.initInternal(parentPageId = -1, leftmostChildPageId = -1)
 
         node.isLeaf.shouldBeFalse()
         node.keyCount shouldBe 0
@@ -57,24 +57,24 @@ class BPlusTreeNodeTest {
     }
 
     @Test
-    fun `내부 노드 초기화 후 parentPageId와 rightmostChildPageId가 보존된다`() {
+    fun `내부 노드 초기화 후 parentPageId와 leftmostChildPageId가 보존된다`() {
         val buffer = newPageBuffer()
         val node = BPlusTreeNode(buffer)
-        node.initInternal(parentPageId = 7, rightmostChildPageId = 99)
+        node.initInternal(parentPageId = 7, leftmostChildPageId = 99)
 
         node.parentPageId shouldBe 7
-        node.rightmostChildPageId shouldBe 99
+        node.leftmostChildPageId shouldBe 99
     }
 
     @Test
-    fun `내부 노드 rightmostChildPageId는 쓰기 후 다시 읽을 수 있다`() {
+    fun `내부 노드 leftmostChildPageId는 쓰기 후 다시 읽을 수 있다`() {
         val buffer = newPageBuffer()
         val node = BPlusTreeNode(buffer)
-        node.initInternal(parentPageId = -1, rightmostChildPageId = -1)
+        node.initInternal(parentPageId = -1, leftmostChildPageId = -1)
 
-        node.rightmostChildPageId = 55
+        node.leftmostChildPageId = 55
 
-        node.rightmostChildPageId shouldBe 55
+        node.leftmostChildPageId shouldBe 55
     }
 
     @Test
@@ -153,9 +153,9 @@ class BPlusTreeNodeTest {
     }
 
     @Test
-    fun `빈 내부 노드에서 findChild는 rightmostChildPageId를 반환한다`() {
+    fun `빈 내부 노드에서 findChild는 leftmostChildPageId를 반환한다`() {
         val node = BPlusTreeNode(newPageBuffer())
-        node.initInternal(parentPageId = -1, rightmostChildPageId = 999)
+        node.initInternal(parentPageId = -1, leftmostChildPageId = 999)
 
         node.findChild("any".toByteArray()) shouldBe 999
     }
@@ -185,59 +185,64 @@ class BPlusTreeNodeTest {
     }
 
     @Test
-    fun `splitInternal은 중간 키를 promote하고 중간 자식을 왼쪽 rightmost로 이관한다`() {
+    fun `splitInternal은 중간 키를 promote하고 그 자식을 오른쪽 leftmost로 이관한다`() {
         val left = BPlusTreeNode(newPageBuffer())
-        left.initInternal(parentPageId = 1, rightmostChildPageId = 9999)
+        left.initInternal(parentPageId = 1, leftmostChildPageId = 9999)
         val right = BPlusTreeNode(newPageBuffer())
-        right.initInternal(parentPageId = 1, rightmostChildPageId = -1)
+        right.initInternal(parentPageId = 1, leftmostChildPageId = -1)
 
-        // 삽입: (banana, 10), (date, 20), (fig, 30), (mango, 40), (pear, 50)
-        //   slot[0]=(banana,10) slot[1]=(date,20) slot[2]=(fig,30) slot[3]=(mango,40) slot[4]=(pear,50)
-        //   rightmost=9999
+        // 삽입: (banana,10),(date,20),(fig,30),(mango,40),(pear,50)
+        //   leftmost=9999
+        //   slot[0..4] = [(banana,10),(date,20),(fig,30),(mango,40),(pear,50)]
+        //   자식 포인터(왼→오): [9999, 10, 20, 30, 40, 50]
         listOf("banana" to 10, "date" to 20, "fig" to 30, "mango" to 40, "pear" to 50)
             .forEach { (k, c) -> left.insertInternalEntry(k.toByteArray(), c).shouldBeTrue() }
 
         val promoteKey = left.splitInternal(newRightNode = right)
 
-        // mid=2: 왼쪽 [banana(10), date(20)] + rightmost=30
-        // promote key = "fig"
-        // 오른쪽 [mango(40), pear(50)] + rightmost=9999
+        // mid=2: slot[2].key="fig"가 promote, slot[2].child=30은 오른쪽 leftmost가 된다.
+        //   left:  leftmost=9999, slots=[(banana,10),(date,20)]
+        //   right: leftmost=30,   slots=[(mango,40),(pear,50)]
         String(promoteKey) shouldBe "fig"
+
         left.keyCount shouldBe 2
-        left.findChild("apple".toByteArray()) shouldBe 10
-        left.findChild("banana".toByteArray()) shouldBe 20
-        left.findChild("date".toByteArray()) shouldBe 30
-        left.findChild("elderberry".toByteArray()) shouldBe 30
+        left.findChild("apple".toByteArray()) shouldBe 9999      // < banana → leftmost
+        left.findChild("banana".toByteArray()) shouldBe 10       // [banana, date) → slot[0]
+        left.findChild("cherry".toByteArray()) shouldBe 10
+        left.findChild("date".toByteArray()) shouldBe 20         // [date, ...) → slot[1]
+        left.findChild("elderberry".toByteArray()) shouldBe 20
 
         right.keyCount shouldBe 2
-        right.findChild("lychee".toByteArray()) shouldBe 40
-        right.findChild("mango".toByteArray()) shouldBe 50
-        right.findChild("pear".toByteArray()) shouldBe 9999
-        right.findChild("quince".toByteArray()) shouldBe 9999
+        right.findChild("fig".toByteArray()) shouldBe 30         // < mango → leftmost=30
+        right.findChild("lychee".toByteArray()) shouldBe 30
+        right.findChild("mango".toByteArray()) shouldBe 40       // [mango, pear) → slot[0]
+        right.findChild("orange".toByteArray()) shouldBe 40
+        right.findChild("pear".toByteArray()) shouldBe 50        // [pear, ...) → slot[1]
+        right.findChild("quince".toByteArray()) shouldBe 50
     }
 
     @Test
     fun `내부 노드에 (key, child) 항목을 삽입한 후 findChild가 범위에 맞는 자식을 반환한다`() {
         val node = BPlusTreeNode(newPageBuffer())
-        node.initInternal(parentPageId = -1, rightmostChildPageId = 999)
+        node.initInternal(parentPageId = -1, leftmostChildPageId = 999)
 
-        // 규약: slot[i].child는 key < slot[i].key인 서브트리.
-        //   (-inf, banana) → 10
-        //   [banana, date) → 20
-        //   [date,  fig)   → 30
-        //   [fig,  +inf)   → 999 (rightmost)
+        // 규약: slot[i].child는 key ≥ slot[i].key인 서브트리.
+        //   ( -inf, banana) → 999 (leftmost)
+        //   [banana, date)  → 10
+        //   [date,  fig)    → 20
+        //   [fig,  +inf)    → 30
         // 삽입 순서는 정렬과 다르게 한다.
         node.insertInternalEntry("date".toByteArray(), 20).shouldBeTrue()
         node.insertInternalEntry("banana".toByteArray(), 10).shouldBeTrue()
         node.insertInternalEntry("fig".toByteArray(), 30).shouldBeTrue()
 
         node.keyCount shouldBe 3
-        node.findChild("apple".toByteArray()) shouldBe 10
-        node.findChild("banana".toByteArray()) shouldBe 20
-        node.findChild("cherry".toByteArray()) shouldBe 20
-        node.findChild("date".toByteArray()) shouldBe 30
-        node.findChild("elderberry".toByteArray()) shouldBe 30
-        node.findChild("fig".toByteArray()) shouldBe 999
-        node.findChild("grape".toByteArray()) shouldBe 999
+        node.findChild("apple".toByteArray()) shouldBe 999
+        node.findChild("banana".toByteArray()) shouldBe 10
+        node.findChild("cherry".toByteArray()) shouldBe 10
+        node.findChild("date".toByteArray()) shouldBe 20
+        node.findChild("elderberry".toByteArray()) shouldBe 20
+        node.findChild("fig".toByteArray()) shouldBe 30
+        node.findChild("grape".toByteArray()) shouldBe 30
     }
 }

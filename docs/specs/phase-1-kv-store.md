@@ -86,7 +86,7 @@ offset  size  field
 2       2     keyCount (n)
 4       4     parentPageId      (root이면 INVALID = -1)
 8       4     nextLeafPageId    (leaf 전용; internal이면 미사용 = -1)
-12      4     rightmostChildPageId (internal 전용; leaf이면 미사용 = -1)
+12      4     leftmostChildPageId (internal 전용; leaf이면 미사용 = -1)
 16      2     freeSpaceOffset   (record 영역의 가장 낮은 offset)
 18      ...   slot directory   ((recordOffset:2, recordLen:2) × n, 키 순 정렬)
 ...
@@ -101,17 +101,24 @@ offset  size  field
 - **리프 노드**: `[keyLen: Short][key bytes][valueLen: Short][value bytes]`
 - **내부 노드**: `[keyLen: Short][key bytes][childPageId: Int]`
   - 각 내부 노드 슬롯은 (키, 자식 포인터) 쌍이다.
-  - slot i는 "이 슬롯의 자식 서브트리에 있는 모든 키 < key_i"를 만족하도록
-    구성된다. 즉 key_i는 해당 슬롯의 **오른쪽 경계(upper bound)** 구분자다.
-  - 가장 오른쪽 자식(키 ≥ key_{n-1}인 서브트리)은 슬롯이 아닌
-    헤더의 `rightmostChildPageId` 필드에 저장한다. 이 방식은 내부 노드가
-    빈(root split 직후) 상태에서도 rightmost 포인터만으로 탐색이 가능하다는
-    장점이 있다.
+  - **규약**: slot i의 `childPageId`는 "이 슬롯의 자식 서브트리가 담는 키의
+    **왼쪽 경계(lower bound, inclusive)**가 key_i"를 의미한다. 즉 slot i의
+    자식 서브트리는 key_i 이상, 그리고 다음 경계(`slot[i+1].key` 또는
+    무한대)보다 작은 키를 담는다.
+  - 가장 작은 키 영역(< key_0인 서브트리)은 슬롯이 아닌 헤더의
+    `leftmostChildPageId` 필드에 저장한다. 이 구조의 핵심 장점은 자식이
+    split될 때 **부모 업데이트가 단순한 `insertInternalEntry(promoteKey,
+    newRightChild)` 한 번으로 끝난다**는 것이다 (기존 왼쪽 자식의 슬롯은
+    수정 없이 그대로 두어도 올바르게 동작). 루트 split 시에도 새 내부
+    루트의 leftmostChild에 왼쪽 자식, slot[0]에 (promoteKey, 오른쪽 자식)을
+    넣으면 된다.
 
 `findChild(key)` 알고리즘:
-1. 슬롯을 이진 탐색하여 `key < key_i`를 만족하는 가장 작은 i를 찾는다.
-2. 그런 i가 존재하면(`i < n`): 슬롯 i의 `childPageId` 반환.
-3. 아니면(키가 모든 슬롯 키보다 크거나 같음): `rightmostChildPageId` 반환.
+1. 슬롯에 대해 upper_bound(key)를 구한다: 가장 작은 i에서 `key_i > key`.
+2. 그런 i가 0이면(모든 슬롯 키보다 key가 작음): `leftmostChildPageId` 반환.
+3. 아니면 slot `i-1`의 `childPageId` 반환 (즉 `key_{i-1} ≤ key < key_i`).
+4. i == n이면(key가 모든 슬롯 키보다 크거나 같음): 슬롯 `n-1`의
+   `childPageId` 반환.
 
 #### Order(차수)
 
