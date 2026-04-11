@@ -93,23 +93,38 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
 
     /**
      * 리프에 (key, value) 항목을 삽입한다.
+     * 슬롯 디렉터리는 항상 키 오름차순(unsigned lexicographic)으로 유지된다.
+     *
+     * 이미 같은 키가 존재하면 기존 슬롯을 새 레코드로 덮어쓴다 (키 개수 불변).
      * 공간이 부족하면 false를 반환한다.
      *
-     * 현재 구현은 정렬을 유지하지 않고 슬롯 디렉터리 끝에 append 한다.
-     * 정렬 유지/이진 탐색은 후속 TDD 사이클에서 도입한다.
+     * split은 후속 TDD 사이클에서 추가된다. 중복 키 갱신 시 이전 레코드는
+     * 논리적으로 dead space가 되며 compaction은 구현하지 않는다.
      */
     fun insertLeafEntry(key: ByteArray, value: ByteArray): Boolean {
         check(isLeaf) { "insertLeafEntry는 리프 노드에만 호출할 수 있다" }
 
         val recordSize = LEAF_RECORD_OVERHEAD + key.size + value.size
+        val (insertPos, matched) = binarySearchLeafSlot(key)
+
+        if (matched) {
+            // 기존 슬롯을 재사용한다. 새 슬롯 엔트리는 필요 없다.
+            if (freeSpaceTop() < recordSize) return false
+            val newRecordOffset = freeSpaceOffset - recordSize
+            writeLeafRecord(newRecordOffset, key, value)
+            writeSlot(insertPos, newRecordOffset, recordSize)
+            freeSpaceOffset = newRecordOffset
+            return true
+        }
+
         val required = recordSize + SLOT_ENTRY_SIZE
         if (freeSpaceTop() < required) return false
 
         val newRecordOffset = freeSpaceOffset - recordSize
         writeLeafRecord(newRecordOffset, key, value)
 
-        val newSlotIndex = keyCount
-        writeSlot(newSlotIndex, newRecordOffset, recordSize)
+        shiftSlotsRight(insertPos)
+        writeSlot(insertPos, newRecordOffset, recordSize)
 
         setKeyCount(keyCount + 1)
         freeSpaceOffset = newRecordOffset
@@ -120,13 +135,14 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
     fun findValue(key: ByteArray): ByteArray? {
         check(isLeaf) { "findValue는 리프 노드에만 호출할 수 있다" }
 
-        for (i in 0 until keyCount) {
-            val slotKey = readLeafKey(i)
-            if (keysEqual(slotKey, key)) {
-                return readLeafValue(i)
-            }
-        }
-        return null
+        val (idx, matched) = binarySearchLeafSlot(key)
+        return if (matched) readLeafValue(idx) else null
+    }
+
+    /** 리프에 저장된 모든 (key, value)를 키 오름차순으로 반환 */
+    fun leafEntries(): List<Pair<ByteArray, ByteArray>> {
+        check(isLeaf) { "leafEntries는 리프 노드에만 호출할 수 있다" }
+        return (0 until keyCount).map { i -> readLeafKey(i) to readLeafValue(i) }
     }
 
     // --- Private helpers ---
@@ -173,8 +189,46 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
         return out
     }
 
-    private fun keysEqual(a: ByteArray, b: ByteArray): Boolean =
-        a.contentEquals(b)
+    /**
+     * 슬롯 디렉터리 안에서 [key]의 위치를 이진 탐색으로 찾는다.
+     *
+     * @return (insertPosition, matched). matched가 true이면 insertPosition이
+     *   키와 동일한 기존 슬롯의 인덱스이다. false이면 insertPosition이 이 키를
+     *   새로 삽입했을 때 자리잡을 슬롯 인덱스이다.
+     */
+    private fun binarySearchLeafSlot(key: ByteArray): Pair<Int, Boolean> {
+        var lo = 0
+        var hi = keyCount
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            val cmp = compareKeysUnsigned(readLeafKey(mid), key)
+            when {
+                cmp < 0 -> lo = mid + 1
+                cmp > 0 -> hi = mid
+                else -> return mid to true
+            }
+        }
+        return lo to false
+    }
+
+    /** unsigned lexicographic byte 비교 */
+    private fun compareKeysUnsigned(a: ByteArray, b: ByteArray): Int {
+        val minLen = minOf(a.size, b.size)
+        for (i in 0 until minLen) {
+            val diff = (a[i].toInt() and 0xFF) - (b[i].toInt() and 0xFF)
+            if (diff != 0) return diff
+        }
+        return a.size - b.size
+    }
+
+    /** 슬롯 [fromSlotIndex, keyCount)의 디렉터리 엔트리를 오른쪽으로 한 칸 밀어낸다 */
+    private fun shiftSlotsRight(fromSlotIndex: Int) {
+        val src = slotEntryOffset(fromSlotIndex)
+        val end = slotEntryOffset(keyCount)
+        for (i in end - 1 downTo src) {
+            buffer.put(i + SLOT_ENTRY_SIZE, buffer.get(i))
+        }
+    }
 
     companion object {
         /** 페이지 ID sentinel: 없음/미지정 */

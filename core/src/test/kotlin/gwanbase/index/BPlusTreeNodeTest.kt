@@ -105,4 +105,50 @@ class BPlusTreeNodeTest {
 
         node.findValue("banana".toByteArray()).shouldBeNull()
     }
+
+    @Test
+    fun `리프에 여러 건을 임의 순서로 삽입 후 findValue가 모두 일치한다`() {
+        val node = BPlusTreeNode(newPageBuffer())
+        node.initLeaf(parentPageId = -1)
+
+        val entries = listOf(
+            "cherry" to "red",
+            "apple" to "green",
+            "banana" to "yellow",
+            "date" to "brown",
+        )
+        entries.forEach { (k, v) ->
+            node.insertLeafEntry(k.toByteArray(), v.toByteArray()).shouldBeTrue()
+        }
+
+        node.keyCount shouldBe 4
+        entries.forEach { (k, v) ->
+            node.findValue(k.toByteArray()) shouldBe v.toByteArray()
+        }
+    }
+
+    @Test
+    fun `리프에 임의 순서로 삽입해도 leafEntries는 키 오름차순으로 반환한다`() {
+        val node = BPlusTreeNode(newPageBuffer())
+        node.initLeaf(parentPageId = -1)
+
+        listOf("cherry", "apple", "banana", "date").forEach {
+            node.insertLeafEntry(it.toByteArray(), "v-$it".toByteArray())
+        }
+
+        val keys = node.leafEntries().map { String(it.first) }
+        keys shouldBe listOf("apple", "banana", "cherry", "date")
+    }
+
+    @Test
+    fun `같은 키로 insertLeafEntry를 두 번 호출하면 값이 최신으로 갱신되고 keyCount는 증가하지 않는다`() {
+        val node = BPlusTreeNode(newPageBuffer())
+        node.initLeaf(parentPageId = -1)
+
+        node.insertLeafEntry("apple".toByteArray(), "red".toByteArray()).shouldBeTrue()
+        node.insertLeafEntry("apple".toByteArray(), "green".toByteArray()).shouldBeTrue()
+
+        node.keyCount shouldBe 1
+        node.findValue("apple".toByteArray()) shouldBe "green".toByteArray()
+    }
 }
