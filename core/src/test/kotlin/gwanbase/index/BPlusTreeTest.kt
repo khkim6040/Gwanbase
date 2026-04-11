@@ -76,4 +76,38 @@ class BPlusTreeTest {
 
         tree.search("apple".toByteArray()) shouldBe "green".toByteArray()
     }
+
+    @Test
+    fun `리프 용량을 초과할 만큼 순차 삽입해도 모든 키가 조회된다`() {
+        // 한 리프(4KB)의 대략적인 용량을 넘도록 충분히 많이 넣는다.
+        // 이 과정에서 leaf split과 루트 split(leaf → internal 승격)이 발생해야 한다.
+        val n = 500
+        for (i in 0 until n) {
+            val k = formatKey(i)
+            val v = formatValue(i)
+            tree.insert(k, v)
+        }
+
+        for (i in 0 until n) {
+            tree.search(formatKey(i)) shouldBe formatValue(i)
+        }
+        tree.search("absent-key".toByteArray()).shouldBeNull()
+    }
+
+    @Test
+    fun `임의 순서로 대량 삽입해도 모든 키가 조회되고 정렬 불변식이 유지된다`() {
+        val n = 2000
+        val indices = (0 until n).toMutableList()
+        indices.shuffle(kotlin.random.Random(seed = 42))
+
+        for (i in indices) {
+            tree.insert(formatKey(i), formatValue(i))
+        }
+        for (i in 0 until n) {
+            tree.search(formatKey(i)) shouldBe formatValue(i)
+        }
+    }
+
+    private fun formatKey(i: Int): ByteArray = "key-%06d".format(i).toByteArray()
+    private fun formatValue(i: Int): ByteArray = "value-%06d".format(i).toByteArray()
 }

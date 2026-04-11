@@ -145,6 +145,12 @@ class BPlusTreeNode(private val buffer: ByteBuffer) {
         return (0 until keyCount).map { i -> readLeafKey(i) to readLeafValue(i) }
     }
 
+    /** 내부 노드에 저장된 모든 (key, childPageId)를 키 오름차순으로 반환 */
+    fun internalEntries(): List<Pair<ByteArray, Int>> {
+        check(!isLeaf) { "internalEntries는 내부 노드에만 호출할 수 있다" }
+        return (0 until keyCount).map { i -> readInternalKey(i) to readInternalChild(i) }
+    }
+
     // --- Split operations ---
 
     /**
