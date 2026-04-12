@@ -26,15 +26,51 @@
 
 ```
 core/
-├── storage/     Phase 1 — DiskManager, BufferPool, SlottedPage
-├── index/       Phase 1 — B+Tree
-├── table/       Phase 2 — Schema, Tuple, Catalog, HeapFile
-├── sql/         Phase 3 — Lexer, Parser, AST, Binder
-├── execution/   Phase 4 — Operators (Scan, Filter, Join, Sort...)
-├── txn/         Phase 5,6 — WAL, Recovery, LockManager
-├── optimizer/   Phase 7 — Statistics, CostModel, RuleOptimizer
-└── server/      Phase 8 — TCP Server, Wire Protocol
+├── storage/     Phase 1 ✅ DiskManager, BufferPool, SlottedPage
+├── index/       Phase 1 ✅ B+Tree (BPlusTreeNode, BPlusTree)
+├── kv/          Phase 1 ✅ KVStore (public Key-Value API)
+├── table/       Phase 2 ⬜ Schema, Tuple, Catalog, HeapFile
+├── sql/         Phase 3 ⬜ Lexer, Parser, AST, Binder
+├── execution/   Phase 4 ⬜ Operators (Scan, Filter, Join, Sort...)
+├── txn/         Phase 5,6 ⬜ WAL, Recovery, LockManager
+├── optimizer/   Phase 7 ⬜ Statistics, CostModel, RuleOptimizer
+└── server/      Phase 8 ⬜ TCP Server, Wire Protocol
 ```
+
+## Phase 1 완료 상태 (v0.1-kvstore)
+
+스토리지 레이어 + B+Tree + KVStore까지 완성된 persistent key-value store.
+상세 설계는 `docs/specs/phase-1-kv-store.md` 참조.
+
+### 계층 구조 (아래 → 위 방향 의존)
+
+```
+KVStore (gwanbase.kv)        ← public API: put/get/delete/scan/close
+  └── BPlusTree (gwanbase.index)
+        └── BPlusTreeNode        ← 18B 고정 헤더 + 정렬 슬롯 디렉터리
+                └── BufferPoolManager (gwanbase.storage)
+                      ├── LruReplacer
+                      └── DiskManager
+                            └── FileChannel (java.nio)
+```
+
+### 파일 레이아웃
+
+```
+pageId 0         메타데이터 페이지 (magic "GWNB", version, rootPageId)
+pageId 1 ..      B+Tree 노드들 (leaf / internal)
+```
+
+### 핵심 설계 결정
+- B+Tree 노드는 SlottedPage 재사용 대신 **정렬 슬롯 전용 레이아웃** 사용
+  (SlottedPage 슬롯 ID는 삽입 순서라 이진 탐색·split 불가)
+- 내부 노드는 **leftmost-child 규약**: slot[i].child는 keys ≥ slot[i].key
+  서브트리, `leftmostChildPageId`는 `< slot[0].key` 서브트리. 자식 split
+  전파가 단순 `insertInternalEntry(promoteKey, newRight)` 한 번으로 끝남
+- 키/값 비교는 unsigned lexicographic (0x80+ 바이트 정렬 정확성)
+- 삭제는 lazy (리프 슬롯만 제거, 레코드는 dead space, merge/rebalance 없음)
+- B+Tree order는 free-space 기반 동적 결정 (가변 길이 키 지원)
+- **메타데이터 원자성 미보장** — WAL은 Phase 5에서 추가 예정
 
 ## 설계 원칙
 
