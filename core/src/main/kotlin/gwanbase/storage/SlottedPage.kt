@@ -39,7 +39,7 @@ class SlottedPage(private val buffer: ByteBuffer) {
     /** 새 빈 페이지로 초기화 */
     fun init() {
         slotCount = 0
-        freeSpaceOffset = DiskManager.PAGE_SIZE
+        freeSpaceOffset = buffer.capacity()
     }
 
     /** 현재 사용 가능한 빈 공간 바이트 수 */
