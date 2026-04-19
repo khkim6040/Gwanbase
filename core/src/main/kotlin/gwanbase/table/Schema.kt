@@ -5,6 +5,13 @@ package gwanbase.table
  */
 class Schema(val columns: List<Column>) {
 
+    init {
+        val names = columns.map { it.name }
+        require(names.size == names.toSet().size) {
+            "중복된 컬럼 이름이 존재한다: ${names.groupBy { it }.filter { it.value.size > 1 }.keys}"
+        }
+    }
+
     private val nameToIndex: Map<String, Int> =
         columns.mapIndexed { index, col -> col.name to index }.toMap()
 

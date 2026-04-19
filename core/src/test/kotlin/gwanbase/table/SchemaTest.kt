@@ -59,4 +59,16 @@ class SchemaTest {
         val schema = Schema(listOf(col))
         schema.column(0) shouldBe col
     }
+
+    @Test
+    fun `Schema 생성 시 중복 컬럼명은 예외`() {
+        assertThrows<IllegalArgumentException> {
+            Schema(
+                listOf(
+                    Column("id", DataType.INT32),
+                    Column("id", DataType.INT64),
+                )
+            )
+        }
+    }
 }
