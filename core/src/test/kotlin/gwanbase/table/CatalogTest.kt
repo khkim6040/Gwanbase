@@ -137,4 +137,22 @@ class CatalogTest {
         byId.shouldNotBeNull()
         byId.name shouldBe "users"
     }
+
+    @Test
+    fun `Catalog 페이지 용량 초과 시 예외`() {
+        val dm = DiskManager(tempDir.resolve("overflow_test.db"))
+        val bpm = BufferPoolManager(dm, 512)
+        val catalog = Catalog.createNew(bpm)
+
+        // 최소 크기 테이블 반복 생성으로 4KB 초과 유도
+        val schema = Schema(listOf(Column("c", DataType.INT32)))
+
+        assertThrows<IllegalStateException> {
+            repeat(250) { i ->
+                catalog.createTable("t$i", schema)
+            }
+        }
+
+        dm.close()
+    }
 }

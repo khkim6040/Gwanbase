@@ -1,6 +1,7 @@
 package gwanbase.table
 
 import gwanbase.storage.BufferPoolManager
+import gwanbase.storage.DiskManager
 import java.nio.ByteOrder
 
 /**
@@ -89,7 +90,25 @@ class Catalog(
 
     // --- 직렬화/역직렬화 ---
 
+    /** 현재 테이블 목록의 직렬화 예상 크기를 바이트 단위로 반환한다. */
+    private fun estimateSerializedSize(): Int {
+        var size = 4 + 4 // nextTableId + tableCount
+        for (info in tables) {
+            val nameBytes = info.name.toByteArray(Charsets.UTF_8).size
+            size += 4 + 2 + nameBytes + 4 + 2 // tableId, nameLen, name, heapFileFirstPageId, colCount
+            for (col in info.schema.columns) {
+                val colNameBytes = col.name.toByteArray(Charsets.UTF_8).size
+                size += 2 + colNameBytes + 1 + 2 + 1 // colNameLen, colName, dataType, maxLength, nullable
+            }
+        }
+        return size
+    }
+
     private fun flush() {
+        val estimatedSize = estimateSerializedSize()
+        check(estimatedSize <= DiskManager.PAGE_SIZE) {
+            "Catalog 직렬화 크기(${estimatedSize})가 페이지 크기(${DiskManager.PAGE_SIZE})를 초과한다"
+        }
         val page = bpm.fetchPage(catalogPageId) ?: error("Catalog 페이지 조회 실패")
         try {
             val buf = page.data
