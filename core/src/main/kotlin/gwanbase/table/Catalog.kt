@@ -137,8 +137,6 @@ class Catalog(
                     buf.put(if (col.nullable) 1.toByte() else 0.toByte())
                 }
             }
-
-            page.isDirty = true
         } finally {
             bpm.unpinPage(catalogPageId, isDirty = true)
         }

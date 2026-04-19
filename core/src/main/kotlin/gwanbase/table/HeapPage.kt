@@ -62,7 +62,7 @@ class HeapPage(private val buffer: ByteBuffer) {
     fun deleteRecord(slotId: Int): Boolean = slottedPage.deleteRecord(slotId)
 
     /** 유효한 레코드 수 */
-    val recordCount: Int get() = slottedPage.allRecords().size
+    val recordCount: Int get() = slottedPage.activeRecordCount
 
     /** 여유 공간 바이트 수 */
     val freeSpace: Int get() = slottedPage.freeSpace

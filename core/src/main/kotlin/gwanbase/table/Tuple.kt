@@ -23,10 +23,8 @@ class Tuple(val schema: Schema, private val values: Array<Any?>) {
             "값 개수(${values.size})가 컬럼 수(${schema.columnCount})와 일치하지 않는다"
         }
         for (i in values.indices) {
-            if (values[i] == null && !schema.column(i).nullable) {
-                require(false) {
-                    "컬럼 '${schema.column(i).name}'은 nullable이 아닌데 NULL 값이 주어졌다"
-                }
+            require(values[i] != null || schema.column(i).nullable) {
+                "컬럼 '${schema.column(i).name}'은 nullable이 아닌데 NULL 값이 주어졌다"
             }
         }
     }

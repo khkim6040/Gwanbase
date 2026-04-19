@@ -107,6 +107,10 @@ class SlottedPage(private val buffer: ByteBuffer) {
         return true
     }
 
+    /** 삭제되지 않은 유효 레코드 수 (슬롯 디렉터리만 순회, ByteArray 복사 없음) */
+    val activeRecordCount: Int
+        get() = (0 until slotCount).count { getSlotOffset(it).toShort() != DELETED_MARKER }
+
     /** 페이지 내 모든 유효한 (slotId, record) 쌍을 반환 */
     fun allRecords(): List<Pair<Int, ByteArray>> {
         return (0 until slotCount).mapNotNull { slotId ->
