@@ -128,6 +128,31 @@ class HeapFileTest {
     }
 
     @Test
+    fun `Free List 순환 참조 방지 - tail 페이지에서 두 번째 삭제 시 무한 루프 없음`() {
+        val (heapFile, _) = createHeapFile()
+
+        // 페이지 A: 39건(100바이트)으로 가득 채워 Free List에서 제거
+        val ridsA = (0 until 39).map { heapFile.insertTuple(ByteArray(100)) }
+        // 페이지 B: 마찬가지
+        val ridsB = (0 until 39).map { heapFile.insertTuple(ByteArray(100)) }
+
+        // A에서 삭제 → Free List: HEAD → A
+        heapFile.deleteTuple(ridsA[0])
+        // B에서 삭제 → Free List: HEAD → B → A (A는 tail, next=INVALID)
+        heapFile.deleteTuple(ridsB[0])
+        // A(tail)에서 한 번 더 삭제 → 버그 시: A → B → A 순환
+        heapFile.deleteTuple(ridsA[1])
+
+        // 순환이 있으면 insertTuple에서 무한 루프
+        val rid = heapFile.insertTuple(ByteArray(100))
+        heapFile.getTuple(rid).shouldNotBeNull()
+
+        // 전체 scan 정합성: 39 + 39 - 3(삭제) + 1(신규) = 76
+        val scanned = heapFile.scan().asSequence().count()
+        scanned shouldBe 76
+    }
+
+    @Test
     fun `Buffer Pool 압박 - poolSize 4로 정상 동작`() {
         val dm = DiskManager(tempDir.resolve("small_pool.db"))
         val bpm = BufferPoolManager(dm, 4)

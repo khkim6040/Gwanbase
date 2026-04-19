@@ -19,8 +19,8 @@ class HeapPageTest {
     }
 
     @Test
-    fun `초기 상태 - nextFreePageId는 INVALID, 레코드 없음`() {
-        heapPage.nextFreePageId shouldBe HeapPage.INVALID_PAGE_ID
+    fun `초기 상태 - nextFreePageId는 NOT_IN_FREE_LIST, 레코드 없음`() {
+        heapPage.nextFreePageId shouldBe HeapPage.NOT_IN_FREE_LIST
         heapPage.recordCount shouldBe 0
     }
 

@@ -62,14 +62,14 @@ class HeapFile(
                     // 페이지가 가득 찼으면 Free List에서 제거
                     if (heapPage.freeSpace < data.size + 4) {
                         writeFirstFreePageId(heapPage.nextFreePageId)
-                        heapPage.nextFreePageId = HeapPage.INVALID_PAGE_ID
+                        heapPage.nextFreePageId = HeapPage.NOT_IN_FREE_LIST
                     }
                     return RID(freePageId, slotId)
                 }
                 // 이 페이지는 가득 참 → 다음으로
                 val nextFree = heapPage.nextFreePageId
                 writeFirstFreePageId(nextFree)
-                heapPage.nextFreePageId = HeapPage.INVALID_PAGE_ID
+                heapPage.nextFreePageId = HeapPage.NOT_IN_FREE_LIST
                 page.isDirty = true
                 freePageId = nextFree
             } finally {
@@ -205,11 +205,9 @@ class HeapFile(
     }
 
     private fun addToFreeListIfNeeded(dataPageId: Int, heapPage: HeapPage) {
-        val currentFirst = readFirstFreePageId()
-        // 이미 Free List에 있으면 건너뛴다
-        if (dataPageId == currentFirst) return
-        if (heapPage.nextFreePageId != HeapPage.INVALID_PAGE_ID) return
-        heapPage.nextFreePageId = currentFirst
+        // NOT_IN_FREE_LIST가 아니면 이미 Free List에 속해 있다
+        if (heapPage.nextFreePageId != HeapPage.NOT_IN_FREE_LIST) return
+        heapPage.nextFreePageId = readFirstFreePageId()
         writeFirstFreePageId(dataPageId)
     }
 

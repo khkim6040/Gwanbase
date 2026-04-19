@@ -23,6 +23,9 @@ class HeapPage(private val buffer: ByteBuffer) {
         const val HEADER_SIZE = 4
 
         const val INVALID_PAGE_ID = -1
+
+        /** Free Page List에 속하지 않은 상태를 나타내는 센티널 값 */
+        const val NOT_IN_FREE_LIST = -2
     }
 
     init {
@@ -45,7 +48,7 @@ class HeapPage(private val buffer: ByteBuffer) {
 
     /** 빈 페이지로 초기화 */
     fun init() {
-        nextFreePageId = INVALID_PAGE_ID
+        nextFreePageId = NOT_IN_FREE_LIST
         slottedPage.init()
     }
 
