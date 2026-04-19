@@ -8,6 +8,7 @@ import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 
@@ -166,5 +167,26 @@ class HeapFileTest {
         rids.forEach { rid ->
             heapFile.getTuple(rid).shouldNotBeNull()
         }
+    }
+
+    @Test
+    fun `헤더 페이지 최대 데이터 페이지 수 초과 시 예외`() {
+        val dm = DiskManager(tempDir.resolve("overflow_test.db"))
+        val bpm = BufferPoolManager(dm, 64)
+        val heapFile = HeapFile.createNew(bpm)
+
+        // 페이지당 1개 레코드만 들어가는 큰 레코드로 빠르게 페이지 수 증가
+        // HeapPage 가용: 4092 - 4(SlottedPage 헤더) - 4(슬롯 엔트리) = 4084
+        val bigRecord = ByteArray(4084)
+
+        // MAX_DATA_PAGES(1022)개까지 성공
+        repeat(HeapFile.MAX_DATA_PAGES) { heapFile.insertTuple(bigRecord) }
+
+        // 1023번째에서 예외
+        assertThrows<IllegalStateException> {
+            heapFile.insertTuple(bigRecord)
+        }
+
+        dm.close()
     }
 }

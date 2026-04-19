@@ -1,6 +1,7 @@
 package gwanbase.table
 
 import gwanbase.storage.BufferPoolManager
+import gwanbase.storage.DiskManager
 import java.nio.ByteOrder
 
 /**
@@ -29,6 +30,9 @@ class HeapFile(
         private const val OFFSET_FIRST_FREE_PAGE_ID = 0
         private const val OFFSET_DATA_PAGE_COUNT = 4
         private const val OFFSET_DATA_PAGE_IDS = 8
+
+        /** 헤더 페이지 1개에 저장 가능한 최대 데이터 페이지 수 */
+        const val MAX_DATA_PAGES = (DiskManager.PAGE_SIZE - OFFSET_DATA_PAGE_IDS) / 4
 
         /** 새 HeapFile을 생성한다. */
         fun createNew(bpm: BufferPoolManager): HeapFile {
@@ -174,6 +178,9 @@ class HeapFile(
         try {
             page.data.order(ByteOrder.BIG_ENDIAN)
             val count = page.data.getInt(OFFSET_DATA_PAGE_COUNT)
+            check(count < MAX_DATA_PAGES) {
+                "HeapFile 데이터 페이지 수 한도 초과: $count >= $MAX_DATA_PAGES"
+            }
             page.data.putInt(OFFSET_DATA_PAGE_IDS + count * 4, dataPageId)
             page.data.putInt(OFFSET_DATA_PAGE_COUNT, count + 1)
             page.isDirty = true
