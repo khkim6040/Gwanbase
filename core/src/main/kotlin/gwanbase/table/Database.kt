@@ -74,6 +74,10 @@ class Database private constructor(
                 check(magic == MAGIC) {
                     "DB 파일 식별자 불일치: expected ${MAGIC.toString(16)}, got ${magic.toString(16)}"
                 }
+                val version = buf.getShort(OFFSET_VERSION)
+                check(version == VERSION) {
+                    "DB 파일 버전 불일치: expected $VERSION, got $version"
+                }
                 catalogPageId = buf.getInt(OFFSET_CATALOG_PAGE_ID)
             } finally {
                 bpm.unpinPage(METADATA_PAGE_ID, isDirty = false)

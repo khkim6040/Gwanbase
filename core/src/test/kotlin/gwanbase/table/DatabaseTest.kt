@@ -1,5 +1,6 @@
 package gwanbase.table
 
+import gwanbase.storage.DiskManager
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.nulls.shouldNotBeNull
@@ -7,6 +8,7 @@ import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
+import java.nio.ByteOrder
 import java.nio.file.Path
 
 class DatabaseTest {
@@ -127,6 +129,28 @@ class DatabaseTest {
             assertThrows<IllegalArgumentException> {
                 db.insertTuple("nonexistent", Tuple(userSchema, arrayOf(1, "Alice", true)))
             }
+        }
+    }
+
+    @Test
+    fun `잘못된 version의 DB 파일 열기 시 예외`() {
+        val path = dbPath()
+
+        // 정상 DB 생성 후 닫기
+        Database.open(path).use { }
+
+        // 메타데이터 페이지의 version을 변조
+        val dm = DiskManager(path)
+        val buf = dm.readPage(0)
+        buf.order(ByteOrder.BIG_ENDIAN)
+        buf.putShort(4, 99.toShort()) // OFFSET_VERSION = 4, 잘못된 version
+        buf.position(0)
+        dm.writePage(0, buf)
+        dm.close()
+
+        // 열기 시 version 불일치 예외
+        assertThrows<IllegalStateException> {
+            Database.open(path)
         }
     }
 }
