@@ -116,6 +116,29 @@ class TupleTest {
     }
 
     @Test
+    fun `INT32 컬럼에 String 값 삽입 시 예외`() {
+        assertThrows<IllegalArgumentException> {
+            Tuple(intOnlySchema, arrayOf("not-a-number", 25))
+        }
+    }
+
+    @Test
+    fun `VARCHAR 컬럼에 Int 값 삽입 시 예외`() {
+        val schema = Schema(listOf(Column("s", DataType.VARCHAR, maxLength = 100)))
+        assertThrows<IllegalArgumentException> {
+            Tuple(schema, arrayOf(42))
+        }
+    }
+
+    @Test
+    fun `BOOLEAN 컬럼에 String 값 삽입 시 예외`() {
+        val schema = Schema(listOf(Column("b", DataType.BOOLEAN)))
+        assertThrows<IllegalArgumentException> {
+            Tuple(schema, arrayOf("true"))
+        }
+    }
+
+    @Test
     fun `property-based - 랜덤 INT32 값 serialize 후 deserialize 일치`() {
         val schema = Schema(listOf(Column("v", DataType.INT32)))
         val random = java.util.Random(42)

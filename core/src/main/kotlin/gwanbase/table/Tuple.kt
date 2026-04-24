@@ -23,8 +23,23 @@ class Tuple(val schema: Schema, private val values: Array<Any?>) {
             "값 개수(${values.size})가 컬럼 수(${schema.columnCount})와 일치하지 않는다"
         }
         for (i in values.indices) {
-            require(values[i] != null || schema.column(i).nullable) {
-                "컬럼 '${schema.column(i).name}'은 nullable이 아닌데 NULL 값이 주어졌다"
+            val col = schema.column(i)
+            val value = values[i]
+            require(value != null || col.nullable) {
+                "컬럼 '${col.name}'은 nullable이 아닌데 NULL 값이 주어졌다"
+            }
+            if (value != null) {
+                val expectedType = when (col.type) {
+                    DataType.BOOLEAN -> Boolean::class
+                    DataType.INT32 -> Int::class
+                    DataType.INT64 -> Long::class
+                    DataType.FLOAT64 -> Double::class
+                    DataType.TIMESTAMP -> Long::class
+                    DataType.VARCHAR -> String::class
+                }
+                require(expectedType.isInstance(value)) {
+                    "컬럼 '${col.name}'(${col.type})에 잘못된 타입 ${value::class.simpleName}이 주어졌다"
+                }
             }
         }
     }
@@ -60,9 +75,8 @@ class Tuple(val schema: Schema, private val values: Array<Any?>) {
             when (col.type) {
                 DataType.BOOLEAN -> buf.put(if (value as? Boolean == true) 1.toByte() else 0.toByte())
                 DataType.INT32 -> buf.putInt(value as? Int ?: 0)
-                DataType.INT64 -> buf.putLong(value as? Long ?: 0L)
+                DataType.INT64, DataType.TIMESTAMP -> buf.putLong(value as? Long ?: 0L)
                 DataType.FLOAT64 -> buf.putDouble(value as? Double ?: 0.0)
-                DataType.TIMESTAMP -> buf.putLong(value as? Long ?: 0L)
                 DataType.VARCHAR -> {
                     val bytes = (value as? String)?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
                     buf.putShort(bytes.size.toShort())
