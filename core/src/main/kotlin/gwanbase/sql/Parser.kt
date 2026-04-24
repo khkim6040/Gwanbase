@@ -37,9 +37,9 @@ class Parser(private val tokens: List<Token>) {
             TokenType.CREATE -> parseCreateTable()
             TokenType.DROP -> parseDropTable()
             TokenType.SELECT -> parseSelect()
-            TokenType.INSERT -> throw ParseException("INSERT 문은 아직 구현되지 않았다", peek().position)
-            TokenType.UPDATE -> throw ParseException("UPDATE 문은 아직 구현되지 않았다", peek().position)
-            TokenType.DELETE -> throw ParseException("DELETE 문은 아직 구현되지 않았다", peek().position)
+            TokenType.INSERT -> parseInsert()
+            TokenType.UPDATE -> parseUpdate()
+            TokenType.DELETE -> parseDelete()
             else -> throw ParseException("예상하지 못한 토큰: '${peek().literal}'", peek().position)
         }
     }
@@ -213,6 +213,76 @@ class Parser(private val tokens: List<Token>) {
             else -> true
         }
         return OrderByClause(column, ascending)
+    }
+
+    // ── INSERT ──
+
+    /**
+     * INSERT 문을 파싱한다.
+     *
+     * 문법: INSERT INTO tableName (col1, col2, ...) VALUES (expr1, expr2, ...)
+     */
+    private fun parseInsert(): Statement.Insert {
+        advance() // INSERT
+        expect(TokenType.INTO, "'INTO' 키워드가 예상되었다")
+        val tableName = expectIdentifier("테이블명이 예상되었다")
+        expect(TokenType.LPAREN, "'(' 가 예상되었다 (컬럼 목록)")
+        val columns = mutableListOf<String>()
+        columns.add(expectIdentifier("컬럼명이 예상되었다"))
+        while (peek().type == TokenType.COMMA) { advance(); columns.add(expectIdentifier("컬럼명이 예상되었다")) }
+        expect(TokenType.RPAREN, "')' 가 예상되었다")
+        expect(TokenType.VALUES, "'VALUES' 키워드가 예상되었다")
+        expect(TokenType.LPAREN, "'(' 가 예상되었다 (값 목록)")
+        val values = mutableListOf<Expression>()
+        values.add(parseExpression(0))
+        while (peek().type == TokenType.COMMA) { advance(); values.add(parseExpression(0)) }
+        expect(TokenType.RPAREN, "')' 가 예상되었다")
+        return Statement.Insert(tableName, columns, values)
+    }
+
+    // ── UPDATE ──
+
+    /**
+     * UPDATE 문을 파싱한다.
+     *
+     * 문법: UPDATE tableName SET col1 = expr1, col2 = expr2, ... [WHERE condition]
+     */
+    private fun parseUpdate(): Statement.Update {
+        advance() // UPDATE
+        val tableName = expectIdentifier("테이블명이 예상되었다")
+        expect(TokenType.SET, "'SET' 키워드가 예상되었다")
+        val assignments = mutableListOf<Assignment>()
+        assignments.add(parseAssignment())
+        while (peek().type == TokenType.COMMA) { advance(); assignments.add(parseAssignment()) }
+        val where = if (peek().type == TokenType.WHERE) { advance(); parseExpression(0) } else null
+        return Statement.Update(tableName, assignments, where)
+    }
+
+    /**
+     * SET 절의 대입을 파싱한다.
+     *
+     * 문법: column = expr
+     */
+    private fun parseAssignment(): Assignment {
+        val column = expectIdentifier("컬럼명이 예상되었다")
+        expect(TokenType.EQ, "'=' 가 예상되었다")
+        val value = parseExpression(0)
+        return Assignment(column, value)
+    }
+
+    // ── DELETE ──
+
+    /**
+     * DELETE 문을 파싱한다.
+     *
+     * 문법: DELETE FROM tableName [WHERE condition]
+     */
+    private fun parseDelete(): Statement.Delete {
+        advance() // DELETE
+        expect(TokenType.FROM, "'FROM' 키워드가 예상되었다")
+        val tableName = expectIdentifier("테이블명이 예상되었다")
+        val where = if (peek().type == TokenType.WHERE) { advance(); parseExpression(0) } else null
+        return Statement.Delete(tableName, where)
     }
 
     // ── Pratt parsing (표현식) ──

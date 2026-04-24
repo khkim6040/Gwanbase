@@ -4,6 +4,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 
 /**
  * Parser 단위 테스트.
@@ -240,27 +241,98 @@ class ParserTest {
         stmt.limit shouldBe 5
     }
 
+    // ── INSERT ──
+
+    @Test
+    fun `INSERT 기본`() {
+        val stmt = parse("INSERT INTO users (id, name) VALUES (1, 'Alice');")
+        stmt.shouldBeInstanceOf<Statement.Insert>()
+        stmt.tableName shouldBe "users"
+        stmt.columns shouldBe listOf("id", "name")
+        stmt.values.size shouldBe 2
+        stmt.values[0].shouldBeInstanceOf<Expression.IntLiteral>().value shouldBe 1L
+        stmt.values[1].shouldBeInstanceOf<Expression.StringLiteral>().value shouldBe "Alice"
+    }
+
+    @Test
+    fun `INSERT NULL 값 포함`() {
+        val stmt = parse("INSERT INTO t (a, b) VALUES (NULL, TRUE);")
+        stmt.shouldBeInstanceOf<Statement.Insert>()
+        stmt.values[0].shouldBeInstanceOf<Expression.NullLiteral>()
+        stmt.values[1].shouldBeInstanceOf<Expression.BoolLiteral>().value shouldBe true
+    }
+
+    // ── UPDATE ──
+
+    @Test
+    fun `UPDATE 단일 SET`() {
+        val stmt = parse("UPDATE users SET name = 'Bob' WHERE id = 1;")
+        stmt.shouldBeInstanceOf<Statement.Update>()
+        stmt.tableName shouldBe "users"
+        stmt.assignments.size shouldBe 1
+        stmt.assignments[0].column shouldBe "name"
+        stmt.assignments[0].value.shouldBeInstanceOf<Expression.StringLiteral>().value shouldBe "Bob"
+        stmt.where.shouldBeInstanceOf<Expression.BinaryOp>()
+    }
+
+    @Test
+    fun `UPDATE 다중 SET WHERE 없음`() {
+        val stmt = parse("UPDATE t SET a = 1, b = 2;")
+        stmt.shouldBeInstanceOf<Statement.Update>()
+        stmt.assignments.size shouldBe 2
+        stmt.where shouldBe null
+    }
+
+    // ── DELETE ──
+
+    @Test
+    fun `DELETE WHERE 있음`() {
+        val stmt = parse("DELETE FROM users WHERE id = 1;")
+        stmt.shouldBeInstanceOf<Statement.Delete>()
+        stmt.tableName shouldBe "users"
+        stmt.where.shouldBeInstanceOf<Expression.BinaryOp>()
+    }
+
+    @Test
+    fun `DELETE WHERE 없음 - 전체 삭제`() {
+        val stmt = parse("DELETE FROM users;")
+        stmt.shouldBeInstanceOf<Statement.Delete>()
+        stmt.where shouldBe null
+    }
+
+    // ── SELECT 추가 ──
+
+    @Test
+    fun `SELECT WHERE ORDER BY LIMIT 조합`() {
+        val stmt = parse("SELECT * FROM users WHERE age > 18 ORDER BY name DESC LIMIT 10;")
+        stmt.shouldBeInstanceOf<Statement.Select>()
+        stmt.where.shouldBeInstanceOf<Expression.BinaryOp>().op shouldBe BinaryOperator.GT
+        stmt.orderBy shouldBe OrderByClause("name", ascending = false)
+        stmt.limit shouldBe 10
+    }
+
+    @Test
+    fun `복합 WHERE 조건`() {
+        val stmt = parse("SELECT * FROM t WHERE a > 1 AND b = 'x' OR c IS NULL;")
+        stmt.shouldBeInstanceOf<Statement.Select>()
+        val where = stmt.where.shouldBeInstanceOf<Expression.BinaryOp>()
+        where.op shouldBe BinaryOperator.OR
+        where.left.shouldBeInstanceOf<Expression.BinaryOp>().op shouldBe BinaryOperator.AND
+        where.right.shouldBeInstanceOf<Expression.IsNull>()
+    }
+
     // ── 에러 케이스 ──
 
     @Test
-    fun `INSERT 문은 아직 구현되지 않았다`() {
-        shouldThrow<ParseException> {
-            parse("INSERT INTO users VALUES (1);")
-        }
+    fun `불완전한 SQL 문은 에러`() {
+        assertThrows<ParseException> { parse("SELECT") }
+        assertThrows<ParseException> { parse("CREATE") }
+        assertThrows<ParseException> { parse("INSERT INTO") }
     }
 
     @Test
-    fun `UPDATE 문은 아직 구현되지 않았다`() {
-        shouldThrow<ParseException> {
-            parse("UPDATE users SET name = 'a';")
-        }
-    }
-
-    @Test
-    fun `DELETE 문은 아직 구현되지 않았다`() {
-        shouldThrow<ParseException> {
-            parse("DELETE FROM users;")
-        }
+    fun `SQL 문 뒤에 추가 토큰이 있으면 에러`() {
+        assertThrows<ParseException> { parse("SELECT * FROM t; SELECT * FROM t;") }
     }
 
     @Test
