@@ -39,15 +39,20 @@ class Database private constructor(
          */
         fun open(path: Path, bufferPoolSize: Int = 256): Database {
             val dm = DiskManager(path)
-            val bpm = BufferPoolManager(dm, bufferPoolSize)
+            try {
+                val bpm = BufferPoolManager(dm, bufferPoolSize)
 
-            val catalog = if (dm.pageCount == 0) {
-                createFresh(bpm)
-            } else {
-                loadExisting(bpm)
+                val catalog = if (dm.pageCount == 0) {
+                    createFresh(bpm)
+                } else {
+                    loadExisting(bpm)
+                }
+
+                return Database(dm, bpm, catalog)
+            } catch (e: Throwable) {
+                dm.close()
+                throw e
             }
-
-            return Database(dm, bpm, catalog)
         }
 
         private fun createFresh(bpm: BufferPoolManager): Catalog {
