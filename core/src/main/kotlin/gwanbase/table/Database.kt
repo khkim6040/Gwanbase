@@ -161,6 +161,27 @@ class Database private constructor(
         }
     }
 
+    /** 테이블을 삭제한다. 존재하지 않으면 false를 반환한다. */
+    fun dropTable(name: String): Boolean {
+        checkOpen()
+        return catalog.dropTable(name)
+    }
+
+    /** 튜플을 업데이트한다. 내부적으로 삭제 후 재삽입한다. */
+    fun updateTuple(tableName: String, rid: RID, tuple: Tuple): RID {
+        checkOpen()
+        val info = catalog.getTable(tableName)
+            ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
+        val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
+        return heapFile.updateTuple(rid, tuple.serialize())
+    }
+
+    /** Catalog 인스턴스를 반환한다. Binder에서 스키마 검증용으로 사용한다. */
+    fun getCatalog(): Catalog {
+        checkOpen()
+        return catalog
+    }
+
     override fun close() {
         if (closed) return
         bpm.flushAllPages()

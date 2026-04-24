@@ -133,6 +133,46 @@ class DatabaseTest {
     }
 
     @Test
+    fun `dropTable 후 테이블 조회 시 null 반환`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", userSchema)
+            db.dropTable("users") shouldBe true
+            db.getTable("users") shouldBe null
+        }
+    }
+
+    @Test
+    fun `존재하지 않는 테이블 dropTable 시 false 반환`() {
+        Database.open(dbPath()).use { db ->
+            db.dropTable("nonexistent") shouldBe false
+        }
+    }
+
+    @Test
+    fun `updateTuple 후 조회 시 변경된 값 반환`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", userSchema)
+            val original = Tuple(userSchema, arrayOf(1, "Alice", true))
+            val rid = db.insertTuple("users", original)
+            val updated = Tuple(userSchema, arrayOf(1, "Bob", false))
+            val newRid = db.updateTuple("users", rid, updated)
+            val result = db.getTuple("users", newRid)
+            result.shouldNotBeNull()
+            result.getString(1) shouldBe "Bob"
+            result.getBoolean(2) shouldBe false
+        }
+    }
+
+    @Test
+    fun `getCatalog은 Catalog 인스턴스를 반환한다`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", userSchema)
+            val catalog = db.getCatalog()
+            catalog.getTable("users").shouldNotBeNull()
+        }
+    }
+
+    @Test
     fun `잘못된 version의 DB 파일 열기 시 예외`() {
         val path = dbPath()
 
