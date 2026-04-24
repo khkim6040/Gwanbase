@@ -39,7 +39,7 @@ class SlottedPage(private val buffer: ByteBuffer) {
     /** 새 빈 페이지로 초기화 */
     fun init() {
         slotCount = 0
-        freeSpaceOffset = DiskManager.PAGE_SIZE
+        freeSpaceOffset = buffer.capacity()
     }
 
     /** 현재 사용 가능한 빈 공간 바이트 수 */
@@ -106,6 +106,10 @@ class SlottedPage(private val buffer: ByteBuffer) {
         setSlotLength(slotId, 0)
         return true
     }
+
+    /** 삭제되지 않은 유효 레코드 수 (슬롯 디렉터리만 순회, ByteArray 복사 없음) */
+    val activeRecordCount: Int
+        get() = (0 until slotCount).count { getSlotOffset(it).toShort() != DELETED_MARKER }
 
     /** 페이지 내 모든 유효한 (slotId, record) 쌍을 반환 */
     fun allRecords(): List<Pair<Int, ByteArray>> {

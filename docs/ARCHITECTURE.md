@@ -29,7 +29,7 @@ core/
 ├── storage/     Phase 1 ✅ DiskManager, BufferPool, SlottedPage
 ├── index/       Phase 1 ✅ B+Tree (BPlusTreeNode, BPlusTree)
 ├── kv/          Phase 1 ✅ KVStore (public Key-Value API)
-├── table/       Phase 2 ⬜ Schema, Tuple, Catalog, HeapFile
+├── table/       Phase 2 ✅ Schema, Tuple, HeapFile, Catalog, Database
 ├── sql/         Phase 3 ⬜ Lexer, Parser, AST, Binder
 ├── execution/   Phase 4 ⬜ Operators (Scan, Filter, Join, Sort...)
 ├── txn/         Phase 5,6 ⬜ WAL, Recovery, LockManager
@@ -71,6 +71,38 @@ pageId 1 ..      B+Tree 노드들 (leaf / internal)
 - 삭제는 lazy (리프 슬롯만 제거, 레코드는 dead space, merge/rebalance 없음)
 - B+Tree order는 free-space 기반 동적 결정 (가변 길이 키 지원)
 - **메타데이터 원자성 미보장** — WAL은 Phase 5에서 추가 예정
+
+## Phase 2 완료 상태 (v0.2-table)
+
+스토리지 레이어 위에 관계형 테이블 저장소 구축.
+상세 설계는 `docs/specs/phase-2-table-storage.md` 참조.
+
+### 계층 구조
+
+```
+Database (gwanbase.table)        ← 진입점: open/close, 테이블 CRUD
+  ├── Catalog                    ← 메타데이터 영속 (전용 페이지)
+  └── HeapFile                   ← 튜플 저장 (Free Page List)
+        └── HeapPage
+              └── SlottedPage (gwanbase.storage)
+                    └── BufferPoolManager → DiskManager
+```
+
+### 파일 레이아웃
+
+```
+pageId 0    DB 메타데이터 (magic "GWNB", version=2, catalogPageId)
+pageId 1    Catalog 페이지 (테이블/인덱스 메타데이터)
+pageId 2+   HeapFile 헤더/데이터 페이지 (동적 할당)
+```
+
+### 핵심 설계 결정
+- 단일 파일 레이아웃 (SQLite 방식, 향후 PostgreSQL 방식 파일 분리 예정)
+- RID `(pageId, slotId)` 기반 튜플 식별 (PostgreSQL 방식)
+- Free Page List로 빈 공간 관리
+- Catalog 전용 페이지에 바이너리 직렬화
+- Tuple은 null bitmap + 스키마 순서 직렬화 (BIG_ENDIAN)
+- HeapPage는 SlottedPage를 offset 4 ByteBuffer slice로 감싸서 재사용
 
 ## 설계 원칙
 
