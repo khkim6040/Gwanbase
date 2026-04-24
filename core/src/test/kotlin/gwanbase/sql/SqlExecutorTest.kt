@@ -1,6 +1,7 @@
 package gwanbase.sql
 
 import gwanbase.table.*
+import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -31,7 +32,9 @@ class SqlExecutorTest {
         val result = executor.execute("CREATE TABLE students (id INT NOT NULL, name VARCHAR(50), score INT)")
         result shouldBe ExecuteResult.Created("students")
         // 테이블이 실제로 존재하는지 확인
-        database.getTable("students") shouldBe database.getTable("students")
+        val tableInfo = database.getTable("students")
+        tableInfo.shouldNotBeNull()
+        tableInfo.schema.columnCount shouldBe 3
     }
 
     // ── 2. DROP TABLE ──
