@@ -111,6 +111,15 @@ class Binder(private val catalog: Catalog) {
         for (assignment in stmt.assignments) {
             requireColumn(schema, assignment.column)
             validateExpression(schema, assignment.value)
+
+            // NOT NULL 컬럼에 NULL 대입 검증
+            if (assignment.value is Expression.NullLiteral) {
+                val colIdx = schema.columnIndex(assignment.column)
+                val column = schema.column(colIdx)
+                if (!column.nullable) {
+                    throw BindException("NOT NULL 컬럼 '${assignment.column}'에 NULL을 대입할 수 없다")
+                }
+            }
         }
 
         // WHERE 절 검증

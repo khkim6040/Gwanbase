@@ -146,6 +146,12 @@ class BinderTest {
     }
 
     @Test
+    fun `UPDATE SET에서 NOT NULL 컬럼에 NULL 대입 시 에러`() {
+        val stmt = parse("UPDATE users SET id = NULL WHERE name = 'Alice';")
+        assertThrows<BindException> { binder.bind(stmt) }
+    }
+
+    @Test
     fun `중복 테이블명 CREATE 시 에러`() {
         val ex = assertThrows<BindException> {
             binder.bind(parse("CREATE TABLE users (id INT)"))
