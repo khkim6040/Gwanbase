@@ -128,6 +128,24 @@ class BinderTest {
     }
 
     @Test
+    fun `INSERT 컬럼 수와 값 수가 다르면 에러`() {
+        val stmt = parse("INSERT INTO users (id, name) VALUES (1);")
+        assertThrows<BindException> { binder.bind(stmt) }
+    }
+
+    @Test
+    fun `INSERT 중복 컬럼 지정 시 에러`() {
+        val stmt = parse("INSERT INTO users (id, id) VALUES (1, 2);")
+        assertThrows<BindException> { binder.bind(stmt) }
+    }
+
+    @Test
+    fun `INSERT 시 NOT NULL 컬럼 누락 에러`() {
+        val stmt = parse("INSERT INTO users (name) VALUES ('Alice');")
+        assertThrows<BindException> { binder.bind(stmt) }
+    }
+
+    @Test
     fun `중복 테이블명 CREATE 시 에러`() {
         val ex = assertThrows<BindException> {
             binder.bind(parse("CREATE TABLE users (id INT)"))

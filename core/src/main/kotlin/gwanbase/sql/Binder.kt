@@ -41,6 +41,21 @@ class Binder(private val catalog: Catalog) {
     private fun bindInsert(stmt: Statement.Insert) {
         val schema = requireTable(stmt.tableName)
 
+        // 컬럼 수와 값 수 일치 검증
+        if (stmt.columns.size != stmt.values.size) {
+            throw BindException(
+                "컬럼 수(${stmt.columns.size})와 값 수(${stmt.values.size})가 일치하지 않는다"
+            )
+        }
+
+        // 중복 컬럼 검증
+        val seen = mutableSetOf<String>()
+        for (colName in stmt.columns) {
+            if (!seen.add(colName)) {
+                throw BindException("중복된 컬럼 '$colName'이 지정되었다")
+            }
+        }
+
         // 컬럼 존재 검증
         for (colName in stmt.columns) {
             requireColumn(schema, colName)
@@ -48,13 +63,21 @@ class Binder(private val catalog: Catalog) {
 
         // NOT NULL 검증: 컬럼과 값을 매칭하여 NULL 리터럴 확인
         for ((index, value) in stmt.values.withIndex()) {
-            if (index < stmt.columns.size && value is Expression.NullLiteral) {
+            if (value is Expression.NullLiteral) {
                 val colName = stmt.columns[index]
                 val colIdx = schema.columnIndex(colName)
                 val column = schema.column(colIdx)
                 if (!column.nullable) {
                     throw BindException("NOT NULL 컬럼 '${colName}'에 NULL을 삽입할 수 없다")
                 }
+            }
+        }
+
+        // NOT NULL 컬럼 누락 검증
+        for (i in 0 until schema.columnCount) {
+            val column = schema.column(i)
+            if (!column.nullable && column.name !in seen) {
+                throw BindException("NOT NULL 컬럼 '${column.name}'이 INSERT 컬럼 목록에 누락되었다")
             }
         }
     }
