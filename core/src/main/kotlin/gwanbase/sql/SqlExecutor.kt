@@ -270,7 +270,7 @@ class SqlExecutor(private val database: Database) {
                     }
                 }
             }
-            else -> error("INSERT VALUES에서 지원하지 않는 표현식: $expr")
+            else -> throw BindException("INSERT VALUES에서 지원하지 않는 표현식: $expr")
         }
     }
 
@@ -335,7 +335,7 @@ class SqlExecutor(private val database: Database) {
      * 이항 연산을 평가한다.
      */
     private fun evaluateBinaryOp(left: Any?, op: BinaryOperator, right: Any?): Any? {
-        // AND/OR 단락 평가
+        // AND/OR NULL 전파
         if (op == BinaryOperator.AND) {
             if (left == false) return false
             if (right == false) return false
