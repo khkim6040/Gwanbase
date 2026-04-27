@@ -5,6 +5,7 @@ import gwanbase.sql.SqlExecutor
 import gwanbase.storage.BufferPoolManager
 import gwanbase.storage.DiskManager
 import gwanbase.wal.LogManager
+import gwanbase.wal.RecoveryManager
 import gwanbase.wal.TransactionContext
 import gwanbase.wal.WalCallbackImpl
 import java.nio.ByteOrder
@@ -60,9 +61,21 @@ class Database private constructor(
                 val logPath = path.resolveSibling(path.fileName.toString() + ".wal")
                 val logManager = LogManager(logPath)
 
-                val db = Database(dm, bpm, catalog, logManager)
+                // Recovery 수행 (WAL 콜백 연결 전 — recovery 중 추가 로깅 방지)
+                val recoveryManager = RecoveryManager(logManager, bpm)
+                val nextTxnId = recoveryManager.recover()
 
-                // WAL 콜백 연결
+                // Catalog 재로드 (recovery가 catalog 페이지를 변경했을 수 있음)
+                val recoveredCatalog = if (dm.pageCount > 0) {
+                    loadExisting(bpm)
+                } else {
+                    catalog
+                }
+
+                val db = Database(dm, bpm, recoveredCatalog, logManager)
+                db.nextTxnId = nextTxnId
+
+                // WAL 콜백 연결 (recovery 완료 후)
                 bpm.walCallback = WalCallbackImpl(logManager) { db.currentTxn }
 
                 return db
@@ -246,6 +259,10 @@ class Database private constructor(
     override fun close() {
         if (closed) return
         bpm.flushAllPages()
+        logManager?.let { lm ->
+            lm.appendCheckpoint()
+            lm.flush(lm.recordCount() - 1)
+        }
         logManager?.close()
         diskManager.close()
         closed = true
