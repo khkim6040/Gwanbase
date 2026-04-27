@@ -5,6 +5,7 @@ import gwanbase.sql.SqlExecutor
 import gwanbase.storage.BufferPoolManager
 import gwanbase.storage.DiskManager
 import gwanbase.wal.LogManager
+import gwanbase.wal.LogRecord
 import gwanbase.wal.RecoveryManager
 import gwanbase.wal.TransactionContext
 import gwanbase.wal.WalCallbackImpl
@@ -247,13 +248,38 @@ class Database private constructor(
         currentTxn = null
     }
 
+    /**
+     * 트랜잭션을 중단하고 dirty page의 before-image를 복원한다.
+     *
+     * currentTxn을 먼저 null로 설정하여 복원 중 WalCallback이 추가 로그를 기록하지 않도록 한다.
+     */
     private fun abortTransaction() {
         val txn = currentTxn ?: return
+        currentTxn = null // WalCallback 비활성화 (txnProvider() → null)
         val lm = logManager
         if (lm != null) {
-            lm.appendAbort(txn.txnId, txn.lastLsn)
+            // Runtime undo: Update 로그의 before-image를 버퍼 풀에 복원
+            var lsn = txn.lastLsn
+            while (lsn >= 0) {
+                val record = lm.getRecord(lsn)
+                when (record) {
+                    is LogRecord.Update -> {
+                        val page = bpm.fetchPage(record.pageId)
+                        if (page != null) {
+                            page.data.clear()
+                            page.data.put(record.beforeImage)
+                            page.data.flip()
+                            bpm.unpinPage(record.pageId, isDirty = true)
+                        }
+                        lsn = record.prevLsn
+                    }
+                    is LogRecord.Begin -> break
+                    else -> lsn = record.prevLsn
+                }
+            }
+            val abortLsn = lm.appendAbort(txn.txnId, txn.lastLsn)
+            lm.flush(abortLsn)
         }
-        currentTxn = null
     }
 
     /** 테스트 전용: checkpoint 없이 리소스를 닫는다. crash 시뮬레이션에 사용. */
@@ -267,6 +293,7 @@ class Database private constructor(
 
     override fun close() {
         if (closed) return
+        check(currentTxn == null) { "활성 트랜잭션이 있는 상태에서 Database를 닫을 수 없다" }
         bpm.flushAllPages()
         logManager?.let { lm ->
             lm.appendCheckpoint()

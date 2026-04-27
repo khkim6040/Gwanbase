@@ -45,6 +45,7 @@ class LogManager(private val path: Path) : AutoCloseable {
     /**
      * 트랜잭션 시작 레코드를 추가하고 할당된 LSN을 반환한다.
      */
+    @Synchronized
     fun appendBegin(txnId: Int): Int {
         val lsn = nextLsn++
         records.add(LogRecord.Begin(lsn = lsn, txnId = txnId))
@@ -55,6 +56,7 @@ class LogManager(private val path: Path) : AutoCloseable {
     /**
      * 트랜잭션 커밋 레코드를 추가하고 할당된 LSN을 반환한다.
      */
+    @Synchronized
     fun appendCommit(txnId: Int, prevLsn: Int): Int {
         val lsn = nextLsn++
         records.add(LogRecord.Commit(lsn = lsn, txnId = txnId, prevLsn = prevLsn))
@@ -65,6 +67,7 @@ class LogManager(private val path: Path) : AutoCloseable {
     /**
      * 트랜잭션 중단 레코드를 추가하고 할당된 LSN을 반환한다.
      */
+    @Synchronized
     fun appendAbort(txnId: Int, prevLsn: Int): Int {
         val lsn = nextLsn++
         records.add(LogRecord.Abort(lsn = lsn, txnId = txnId, prevLsn = prevLsn))
@@ -78,6 +81,7 @@ class LogManager(private val path: Path) : AutoCloseable {
      * @param beforeImage 수정 이전 페이지 전체(4KB)
      * @param afterImage 수정 이후 페이지 전체(4KB)
      */
+    @Synchronized
     fun appendUpdate(
         txnId: Int,
         prevLsn: Int,
@@ -106,6 +110,7 @@ class LogManager(private val path: Path) : AutoCloseable {
      * @param beforeImage undo 후 페이지 상태(4KB)
      * @param undoNextLsn 다음에 undo할 레코드의 LSN
      */
+    @Synchronized
     fun appendCLR(
         txnId: Int,
         prevLsn: Int,
@@ -132,6 +137,7 @@ class LogManager(private val path: Path) : AutoCloseable {
      * Consistent Checkpoint 레코드를 추가하고 할당된 LSN을 반환한다.
      * [_lastCheckpointLsn]도 갱신한다.
      */
+    @Synchronized
     fun appendCheckpoint(): Int {
         val lsn = nextLsn++
         records.add(LogRecord.Checkpoint(lsn = lsn))
@@ -147,12 +153,14 @@ class LogManager(private val path: Path) : AutoCloseable {
      *
      * @throws IndexOutOfBoundsException LSN이 범위를 벗어난 경우
      */
+    @Synchronized
     fun getRecord(lsn: Int): LogRecord = records[lsn]
 
     /**
      * [fromLsn] 이상인 레코드를 순서대로 순회하는 이터레이터를 반환한다.
      * [fromLsn]이 현재 레코드 수 이상이면 빈 이터레이터를 반환한다.
      */
+    @Synchronized
     fun forwardIterator(fromLsn: Int): Iterator<LogRecord> {
         if (fromLsn >= records.size) return emptyList<LogRecord>().iterator()
         return records.subList(fromLsn, records.size).iterator()
@@ -167,6 +175,7 @@ class LogManager(private val path: Path) : AutoCloseable {
     /**
      * 현재 인메모리 레코드 수를 반환한다.
      */
+    @Synchronized
     fun recordCount(): Int = records.size
 
     // ─── I/O 메서드 ────────────────────────────────────────────────────────────
@@ -176,6 +185,7 @@ class LogManager(private val path: Path) : AutoCloseable {
      *
      * 이미 플러시된 레코드는 건너뛰고, 새로 기록된 레코드만 추가로 파일에 쓴다.
      */
+    @Synchronized
     fun flush(upToLsn: Int) {
         val from = flushedLsn + 1
         val to = minOf(upToLsn, records.size - 1)
