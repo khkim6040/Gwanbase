@@ -1,7 +1,12 @@
 package gwanbase.table
 
+import gwanbase.sql.ExecuteResult
+import gwanbase.sql.SqlExecutor
 import gwanbase.storage.BufferPoolManager
 import gwanbase.storage.DiskManager
+import gwanbase.wal.LogManager
+import gwanbase.wal.TransactionContext
+import gwanbase.wal.WalCallbackImpl
 import java.nio.ByteOrder
 import java.nio.file.Path
 
@@ -21,14 +26,18 @@ class Database private constructor(
     private val diskManager: DiskManager,
     private val bpm: BufferPoolManager,
     private val catalog: Catalog,
+    private val logManager: LogManager?,
 ) : AutoCloseable {
 
     private var closed = false
+    private val sqlExecutor: SqlExecutor = SqlExecutor(this)
+    private var currentTxn: TransactionContext? = null
+    private var nextTxnId: Int = 0
 
     companion object {
         const val METADATA_PAGE_ID = 0
         const val MAGIC = 0x47574E42  // "GWNB"
-        const val VERSION: Short = 2  // Phase 2
+        const val VERSION: Short = 3  // Phase 5: WAL 도입
 
         private const val OFFSET_MAGIC = 0
         private const val OFFSET_VERSION = 4
@@ -48,7 +57,15 @@ class Database private constructor(
                     loadExisting(bpm)
                 }
 
-                return Database(dm, bpm, catalog)
+                val logPath = path.resolveSibling(path.fileName.toString() + ".wal")
+                val logManager = LogManager(logPath)
+
+                val db = Database(dm, bpm, catalog, logManager)
+
+                // WAL 콜백 연결
+                bpm.walCallback = WalCallbackImpl(logManager) { db.currentTxn }
+
+                return db
             } catch (e: Throwable) {
                 dm.close()
                 throw e
@@ -80,7 +97,7 @@ class Database private constructor(
                     "DB 파일 식별자 불일치: expected ${MAGIC.toString(16)}, got ${magic.toString(16)}"
                 }
                 val version = buf.getShort(OFFSET_VERSION)
-                check(version == VERSION) {
+                check(version == VERSION || version == 2.toShort()) {
                     "DB 파일 버전 불일치: expected $VERSION, got $version"
                 }
                 catalogPageId = buf.getInt(OFFSET_CATALOG_PAGE_ID)
@@ -182,9 +199,54 @@ class Database private constructor(
         return catalog
     }
 
+    /**
+     * SQL 문을 auto-commit 트랜잭션으로 실행한다.
+     */
+    fun executeSql(sql: String): ExecuteResult {
+        beginTransaction()
+        try {
+            val result = sqlExecutor.execute(sql)
+            commitTransaction()
+            return result
+        } catch (e: Throwable) {
+            abortTransaction()
+            throw e
+        }
+    }
+
+    private fun beginTransaction() {
+        val txnId = nextTxnId++
+        val txn = TransactionContext(txnId)
+        val lm = logManager
+        if (lm != null) {
+            txn.lastLsn = lm.appendBegin(txnId)
+        }
+        currentTxn = txn
+    }
+
+    private fun commitTransaction() {
+        val txn = currentTxn ?: return
+        val lm = logManager
+        if (lm != null) {
+            val commitLsn = lm.appendCommit(txn.txnId, txn.lastLsn)
+            lm.flush(commitLsn)
+        }
+        currentTxn = null
+    }
+
+    private fun abortTransaction() {
+        val txn = currentTxn ?: return
+        val lm = logManager
+        if (lm != null) {
+            lm.appendAbort(txn.txnId, txn.lastLsn)
+        }
+        currentTxn = null
+    }
+
     override fun close() {
         if (closed) return
         bpm.flushAllPages()
+        logManager?.close()
         diskManager.close()
         closed = true
     }
