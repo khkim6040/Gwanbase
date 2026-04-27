@@ -129,37 +129,4 @@ class PlannerTest {
         op.close()
     }
 
-    @Test
-    fun `planScan - WHERE 없이 전체 스캔`() {
-        val schema = database.getTable("students")!!.schema
-        database.insertTuple("students", Tuple(schema, arrayOf(1, "Alice", 90)))
-        database.insertTuple("students", Tuple(schema, arrayOf(2, "Bob", 70)))
-
-        val op = planner.planScan("students", where = null)
-        op.open()
-        var count = 0
-        while (op.next() != null) count++
-        op.close()
-
-        count shouldBe 2
-    }
-
-    @Test
-    fun `planScan - WHERE로 필터링`() {
-        val schema = database.getTable("students")!!.schema
-        database.insertTuple("students", Tuple(schema, arrayOf(1, "Alice", 90)))
-        database.insertTuple("students", Tuple(schema, arrayOf(2, "Bob", 70)))
-
-        val where = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
-            BinaryOperator.GTE,
-            Expression.IntLiteral(80),
-        )
-        val op = planner.planScan("students", where)
-        op.open()
-        val tuple = op.next()!!
-        tuple.getInt(0) shouldBe 1
-        op.next() shouldBe null
-        op.close()
-    }
 }

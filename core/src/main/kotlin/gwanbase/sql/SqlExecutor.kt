@@ -31,8 +31,8 @@ sealed class ExecuteResult {
  * SQL 실행 엔진.
  *
  * Lexer → Parser → Binder → Planner → 연산자 트리 실행 파이프라인으로 SQL 문을 처리한다.
- * Phase 4에서 Volcano (Iterator) 모델을 도입하여 SELECT/UPDATE/DELETE를
- * 연산자 트리로 실행한다. DDL과 INSERT는 직접 실행한다.
+ * Phase 4에서 Volcano (Iterator) 모델을 도입하여 SELECT를 연산자 트리로 실행한다.
+ * UPDATE/DELETE는 RID가 필요하므로 직접 스캔하며, DDL과 INSERT도 직접 실행한다.
  *
  * @param database 대상 데이터베이스
  */
@@ -127,13 +127,14 @@ class SqlExecutor(private val database: Database) {
             val columns = (0 until outputSchema.columnCount).map { outputSchema.column(it).name }
 
             val rows = mutableListOf<List<Any?>>()
-            var tuple = op.next()
-            while (tuple != null) {
+            var current = op.next()
+            while (current != null) {
+                val t = current
                 val row = (0 until outputSchema.columnCount).map { i ->
-                    ExpressionEvaluator.getTupleValue(tuple!!, i, outputSchema.column(i).type)
+                    ExpressionEvaluator.getTupleValue(t, i, outputSchema.column(i).type)
                 }
                 rows.add(row)
-                tuple = op.next()
+                current = op.next()
             }
 
             return ExecuteResult.Selected(columns, rows)

@@ -106,7 +106,7 @@ class ProjectOperator(
         }
 
         /**
-         * 표현식의 이름을 생성한다 (컬럼 참조면 컬�� 이름, 그 외는 toString).
+         * 표현식의 이름을 생성한다 (컬럼 참조면 컬럼 이름, 그 외는 toString).
          */
         private fun expressionName(expr: Expression): String {
             return when (expr) {

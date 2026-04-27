@@ -109,9 +109,6 @@ object ExpressionEvaluator {
 class Planner(private val database: Database) {
     /** SELECT 문을 연산자 트리로 변환한다. */
     fun planSelect(stmt: Statement.Select): Operator
-
-    /** UPDATE/DELETE의 스캔+필터 부분을 연산자 트리로 변환한다. */
-    fun planScan(tableName: String, where: Expression?): Operator
 }
 ```
 
@@ -125,8 +122,8 @@ class SqlExecutor(private val database: Database) {
 
 내부 구현만 변경:
 - `executeSelect()`: Planner로 연산자 트리 생성 → 루트에서 next() 반복 → ExecuteResult.Selected 생성
-- `executeUpdate()`: Planner.planScan()으로 대상 행 식별 → 업데이트 수행
-- `executeDelete()`: Planner.planScan()으로 대상 행 식별 → 삭제 수행
+- `executeUpdate()`: Database.scanTable()로 직접 스캔 + ExpressionEvaluator로 WHERE 평가 (RID 필요)
+- `executeDelete()`: Database.scanTable()로 직접 스캔 + ExpressionEvaluator로 WHERE 평가 (RID 필요)
 - `executeCreateTable()`, `executeDropTable()`, `executeInsert()`: 기존 로직 유지 (DDL/INSERT는 연산자 트리 불필요)
 
 ## 내부 설계
@@ -229,9 +226,9 @@ SeqScan(table)
 **Project의 위치**: Project는 가장 마지막에 적용한다. Sort가 정렬 키 컬럼에
 접근해야 하므로 Sort 이전에 Project를 적용하면 정렬 키가 사라질 수 있다.
 
-**UPDATE/DELETE**: `planScan(tableName, where)` → SeqScan + Filter(선택적)
-연산자 트리를 생성하고, 호출자(SqlExecutor)가 next()로 대상 행을 식별한 뒤
-직접 변경/삭제 수행한다.
+**UPDATE/DELETE**: Volcano 연산자 트리를 사용하지 않는다. RID가 필요하므로
+Database.scanTable()로 직접 스캔하고, ExpressionEvaluator로 WHERE 조건을
+평가하여 대상 행을 식별한 뒤 직접 변경/삭제를 수행한다.
 
 ### ExpressionEvaluator 추출
 
@@ -315,7 +312,6 @@ SqlExecutor의 INSERT 관련 메서드는 그대로 유지:
 - SELECT ... WHERE ... → SeqScan + Filter + Project
 - SELECT ... ORDER BY ... → SeqScan + Sort + Project
 - SELECT ... WHERE ... ORDER BY ... LIMIT N → SeqScan + Filter + Sort + Limit + Project
-- planScan(table, where) → SeqScan + Filter
 
 ### 통합 테스트 (기존 Phase 3 테스트 호환)
 - CREATE TABLE → INSERT → SELECT 전체 흐름
