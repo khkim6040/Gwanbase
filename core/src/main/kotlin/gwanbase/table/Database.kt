@@ -256,6 +256,15 @@ class Database private constructor(
         currentTxn = null
     }
 
+    /** 테스트 전용: checkpoint 없이 리소스를 닫는다. crash 시뮬레이션에 사용. */
+    internal fun closeWithoutCheckpoint() {
+        if (closed) return
+        // checkpoint 없이, dirty page flush 없이 닫는다
+        logManager?.close()
+        diskManager.close()
+        closed = true
+    }
+
     override fun close() {
         if (closed) return
         bpm.flushAllPages()
