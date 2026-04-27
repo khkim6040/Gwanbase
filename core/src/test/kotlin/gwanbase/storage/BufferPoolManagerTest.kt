@@ -86,4 +86,68 @@ class BufferPoolManagerTest {
         fetched.data.getInt(0) shouldBe 99999
         bpm2.unpinPage(pageId)
     }
+
+    @Test
+    fun `WAL 콜백 — eviction 시 ensureLogFlushed가 호출된다`() {
+        var flushedLsn = -1
+        val callback = object : WalCallback {
+            override fun ensureLogFlushed(pageLsn: Int) { flushedLsn = pageLsn }
+            override fun onPageFetched(pageId: Int, data: java.nio.ByteBuffer) {}
+            override fun onPageDirtyUnpin(pageId: Int, data: java.nio.ByteBuffer): Int = -1
+        }
+        bpm.walCallback = callback
+
+        // 풀 크기 3, 3개 채우고 dirty로 unpin (newPage pin을 먼저 해제해야 eviction 가능)
+        val ids = (0 until 3).map { _ ->
+            val page = bpm.newPage()!!
+            bpm.unpinPage(page.pageId)
+            page.pageId
+        }
+        ids.forEach { pageId ->
+            val page = bpm.fetchPage(pageId)!!
+            page.pageLsn = 10
+            bpm.unpinPage(pageId, isDirty = true)
+        }
+
+        // 4번째 할당 시 eviction 발생 → ensureLogFlushed(10) 호출
+        bpm.newPage()
+        flushedLsn shouldBe 10
+    }
+
+    @Test
+    fun `WAL 콜백 — fetchPage 시 onPageFetched가 호출된다`() {
+        var fetchedPageId = -1
+        val callback = object : WalCallback {
+            override fun ensureLogFlushed(pageLsn: Int) {}
+            override fun onPageFetched(pageId: Int, data: java.nio.ByteBuffer) { fetchedPageId = pageId }
+            override fun onPageDirtyUnpin(pageId: Int, data: java.nio.ByteBuffer): Int = -1
+        }
+        bpm.walCallback = callback
+
+        val page = bpm.newPage()!!
+        bpm.unpinPage(page.pageId)
+
+        bpm.fetchPage(page.pageId)
+        fetchedPageId shouldBe page.pageId
+        bpm.unpinPage(page.pageId)
+    }
+
+    @Test
+    fun `WAL 콜백 — dirty unpin 시 onPageDirtyUnpin이 호출되고 pageLsn이 설정된다`() {
+        val callback = object : WalCallback {
+            override fun ensureLogFlushed(pageLsn: Int) {}
+            override fun onPageFetched(pageId: Int, data: java.nio.ByteBuffer) {}
+            override fun onPageDirtyUnpin(pageId: Int, data: java.nio.ByteBuffer): Int = 42
+        }
+        bpm.walCallback = callback
+
+        val page = bpm.newPage()!!
+        val pageId = page.pageId
+        page.data.putInt(0, 999)
+        bpm.unpinPage(pageId, isDirty = true)
+
+        val fetched = bpm.fetchPage(pageId)!!
+        fetched.pageLsn shouldBe 42
+        bpm.unpinPage(pageId)
+    }
 }
