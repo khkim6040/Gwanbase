@@ -61,39 +61,56 @@ class LockManager {
     fun acquire(txnId: Int, target: LockTarget, mode: LockMode) {
         val entry = locks.computeIfAbsent(target) { LockEntry() }
 
-        synchronized(entry) {
-            // 이미 같은 모드 이상을 보유 중이면 즉시 반환
-            val existing = entry.holders.find { it.txnId == txnId }
-            if (existing != null) {
-                if (existing.mode == mode || existing.mode == LockMode.EXCLUSIVE) {
-                    return
-                }
-                // S → X 업그레이드: 다른 보유자가 없으면 즉시 업그레이드
-                if (mode == LockMode.EXCLUSIVE) {
-                    val otherHolders = entry.holders.filter { it.txnId != txnId }
-                    if (otherHolders.isEmpty()) {
-                        entry.holders.remove(existing)
-                        entry.holders.add(TxnHolder(txnId, LockMode.EXCLUSIVE))
+        while (true) {
+            var request: LockRequest? = null
+
+            synchronized(entry) {
+                val existing = entry.holders.find { it.txnId == txnId }
+                when {
+                    existing != null && (existing.mode == mode || existing.mode == LockMode.EXCLUSIVE) -> {
+                        // 이미 같은 모드 이상을 보유 중이면 즉시 반환
                         return
                     }
-                    // 다른 보유자 있음 → 대기 (Task 2에서 구현)
-                    val request = LockRequest(txnId, mode, CountDownLatch(1))
-                    entry.waitQueue.add(request)
-                    // TODO: Task 2에서 대기 로직 완성
-                    return
+                    existing != null && mode == LockMode.EXCLUSIVE -> {
+                        // S → X 업그레이드
+                        val otherHolders = entry.holders.filter { it.txnId != txnId }
+                        if (otherHolders.isEmpty()) {
+                            // 다른 보유자 없음: 즉시 업그레이드
+                            entry.holders.remove(existing)
+                            entry.holders.add(TxnHolder(txnId, LockMode.EXCLUSIVE))
+                            return
+                        }
+                        // 다른 보유자 있음: 대기 요청 생성 후 synchronized 블록 밖에서 대기
+                        request = LockRequest(txnId, mode, CountDownLatch(1))
+                        entry.waitQueue.add(request!!)
+                    }
+                    isCompatible(entry, txnId, mode) -> {
+                        // 호환 가능: 즉시 획득
+                        entry.holders.add(TxnHolder(txnId, mode))
+                        return
+                    }
+                    else -> {
+                        // 호환 불가: 대기 요청 생성 후 synchronized 블록 밖에서 대기
+                        request = LockRequest(txnId, mode, CountDownLatch(1))
+                        entry.waitQueue.add(request!!)
+                    }
                 }
             }
 
-            // 호환 가능한지 확인
-            if (isCompatible(entry, txnId, mode)) {
-                entry.holders.add(TxnHolder(txnId, mode))
+            // synchronized 블록 밖에서 대기 — releaseAll()이 진입할 수 있도록
+            if (request != null) {
+                request!!.latch.await()
+                // 깨어난 후 holders에 추가
+                synchronized(entry) {
+                    val existing = entry.holders.find { it.txnId == txnId }
+                    if (existing != null && mode == LockMode.EXCLUSIVE) {
+                        // S→X 업그레이드: 기존 S 잠금 제거 후 X 잠금 추가
+                        entry.holders.remove(existing)
+                    }
+                    entry.holders.add(TxnHolder(txnId, mode))
+                }
                 return
             }
-
-            // 호환 불가 → 대기 (Task 2에서 구현)
-            val request = LockRequest(txnId, mode, CountDownLatch(1))
-            entry.waitQueue.add(request)
-            // TODO: Task 2에서 대기 로직 완성
         }
     }
 
@@ -112,9 +129,22 @@ class LockManager {
         }
     }
 
+    /**
+     * 새 잠금 요청이 현재 보유자 및 대기열과 호환되는지 확인한다.
+     * 대기열이 비어 있지 않으면 공정성을 위해 false를 반환한다 (큐 점프 방지).
+     */
     private fun isCompatible(entry: LockEntry, txnId: Int, mode: LockMode): Boolean {
         if (entry.holders.isEmpty()) return true
         if (entry.waitQueue.isNotEmpty()) return false
+        return isCompatibleWithHolders(entry, txnId, mode)
+    }
+
+    /**
+     * 대기열을 무시하고 현재 보유자와만 호환성을 확인한다.
+     * grantWaiters 내부에서 대기 요청을 평가할 때 사용한다.
+     */
+    private fun isCompatibleWithHolders(entry: LockEntry, txnId: Int, mode: LockMode): Boolean {
+        if (entry.holders.isEmpty()) return true
         return when (mode) {
             LockMode.SHARED -> entry.holders.all { it.mode == LockMode.SHARED || it.txnId == txnId }
             LockMode.EXCLUSIVE -> entry.holders.all { it.txnId == txnId }
@@ -125,9 +155,15 @@ class LockManager {
         val iterator = entry.waitQueue.iterator()
         while (iterator.hasNext()) {
             val request = iterator.next()
-            if (isCompatible(entry, request.txnId, request.mode)) {
-                iterator.remove()
+            // 대기 요청을 먼저 제거한 뒤 호환성을 확인해야
+            // isCompatible이 자기 자신을 대기열에서 보지 않는다
+            iterator.remove()
+            if (isCompatibleWithHolders(entry, request.txnId, request.mode)) {
                 request.latch.countDown()
+            } else {
+                // 호환 불가: 다시 대기열 앞에 복원하고 중단 (FIFO 순서 유지)
+                entry.waitQueue.add(0, request)
+                break
             }
         }
     }
