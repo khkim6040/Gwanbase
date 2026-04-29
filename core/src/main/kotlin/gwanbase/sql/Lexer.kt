@@ -48,6 +48,9 @@ class Lexer(private val source: String) {
             "FLOAT" to TokenType.FLOAT,
             "VARCHAR" to TokenType.VARCHAR,
             "TIMESTAMP" to TokenType.TIMESTAMP,
+            "BEGIN" to TokenType.BEGIN,
+            "COMMIT" to TokenType.COMMIT,
+            "ROLLBACK" to TokenType.ROLLBACK,
         )
     }
 

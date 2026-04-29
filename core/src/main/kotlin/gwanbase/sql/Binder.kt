@@ -24,6 +24,9 @@ class Binder(private val catalog: Catalog) {
             is Statement.Select -> bindSelect(statement)
             is Statement.Update -> bindUpdate(statement)
             is Statement.Delete -> bindDelete(statement)
+            is Statement.Begin -> { /* 검증 불필요 */ }
+            is Statement.Commit -> { /* 검증 불필요 */ }
+            is Statement.Rollback -> { /* 검증 불필요 */ }
         }
         return statement
     }

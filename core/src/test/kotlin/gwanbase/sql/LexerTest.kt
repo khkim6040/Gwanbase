@@ -163,6 +163,24 @@ class LexerTest {
     }
 
     @Test
+    fun `BEGIN 키워드를 토큰화한다`() {
+        val tokens = Lexer("BEGIN").tokenize()
+        tokens[0].type shouldBe TokenType.BEGIN
+    }
+
+    @Test
+    fun `COMMIT 키워드를 토큰화한다`() {
+        val tokens = Lexer("COMMIT").tokenize()
+        tokens[0].type shouldBe TokenType.COMMIT
+    }
+
+    @Test
+    fun `ROLLBACK 키워드를 토큰화한다`() {
+        val tokens = Lexer("ROLLBACK").tokenize()
+        tokens[0].type shouldBe TokenType.ROLLBACK
+    }
+
+    @Test
     fun `CREATE TABLE 문 토큰화`() {
         val sql = "CREATE TABLE users (id INT NOT NULL, name VARCHAR(100))"
         val tokens = Lexer(sql).tokenize()

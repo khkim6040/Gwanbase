@@ -340,4 +340,30 @@ class ParserTest {
         val stmt = parse("SELECT * FROM users")
         stmt.shouldBeInstanceOf<Statement.Select>()
     }
+
+    // ── 트랜잭션 제어 ──
+
+    @Test
+    fun `BEGIN 문을 파싱한다`() {
+        val stmt = parse("BEGIN")
+        stmt shouldBe Statement.Begin
+    }
+
+    @Test
+    fun `COMMIT 문을 파싱한다`() {
+        val stmt = parse("COMMIT")
+        stmt shouldBe Statement.Commit
+    }
+
+    @Test
+    fun `ROLLBACK 문을 파싱한다`() {
+        val stmt = parse("ROLLBACK")
+        stmt shouldBe Statement.Rollback
+    }
+
+    @Test
+    fun `BEGIN 문 뒤에 세미콜론을 허용한다`() {
+        val stmt = parse("BEGIN;")
+        stmt shouldBe Statement.Begin
+    }
 }

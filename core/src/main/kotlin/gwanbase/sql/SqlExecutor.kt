@@ -25,6 +25,15 @@ sealed class ExecuteResult {
 
     /** DELETE 결과. */
     data class Deleted(val count: Int) : ExecuteResult()
+
+    /** BEGIN 결과. */
+    data object TransactionStarted : ExecuteResult()
+
+    /** COMMIT 결과. */
+    data object TransactionCommitted : ExecuteResult()
+
+    /** ROLLBACK 결과. */
+    data object TransactionRolledBack : ExecuteResult()
 }
 
 /**
@@ -66,6 +75,9 @@ class SqlExecutor(private val database: Database) {
             is Statement.Select -> executeSelect(stmt)
             is Statement.Update -> executeUpdate(stmt)
             is Statement.Delete -> executeDelete(stmt)
+            is Statement.Begin -> error("BEGIN은 DatabaseSession에서 처리한다")
+            is Statement.Commit -> error("COMMIT은 DatabaseSession에서 처리한다")
+            is Statement.Rollback -> error("ROLLBACK은 DatabaseSession에서 처리한다")
         }
     }
 

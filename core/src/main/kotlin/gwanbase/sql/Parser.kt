@@ -40,6 +40,9 @@ class Parser(private val tokens: List<Token>) {
             TokenType.INSERT -> parseInsert()
             TokenType.UPDATE -> parseUpdate()
             TokenType.DELETE -> parseDelete()
+            TokenType.BEGIN -> { advance(); Statement.Begin }
+            TokenType.COMMIT -> { advance(); Statement.Commit }
+            TokenType.ROLLBACK -> { advance(); Statement.Rollback }
             else -> throw ParseException("예상하지 못한 토큰: '${peek().literal}'", peek().position)
         }
     }

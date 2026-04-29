@@ -41,6 +41,15 @@ sealed class Statement {
         val tableName: String,
         val where: Expression?,
     ) : Statement()
+
+    /** 트랜잭션 시작. */
+    data object Begin : Statement()
+
+    /** 트랜잭션 커밋. */
+    data object Commit : Statement()
+
+    /** 트랜잭션 롤백. */
+    data object Rollback : Statement()
 }
 
 /**
