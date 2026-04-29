@@ -152,4 +152,92 @@ class LockManagerTest {
         t.join(2000)
         upgraded.get() shouldBe true
     }
+
+    @Test
+    fun `2 트랜잭션 교차 잠금 시 데드락을 감지한다`() {
+        val targetA = LockTarget("t", RID(1, 0))
+        val targetB = LockTarget("t", RID(1, 1))
+        val deadlockDetected = AtomicBoolean(false)
+        val t1Ready = CountDownLatch(1)
+        val t2Ready = CountDownLatch(1)
+
+        lm.acquire(txnId = 1, target = targetA, mode = LockMode.EXCLUSIVE)
+        lm.acquire(txnId = 2, target = targetB, mode = LockMode.EXCLUSIVE)
+
+        val t1 = Thread {
+            t1Ready.countDown()
+            try {
+                lm.acquire(txnId = 1, target = targetB, mode = LockMode.EXCLUSIVE)
+            } catch (e: DeadlockException) {
+                deadlockDetected.set(true)
+            }
+        }
+        t1.start()
+        t1Ready.await()
+        Thread.sleep(50)
+
+        try {
+            lm.acquire(txnId = 2, target = targetA, mode = LockMode.EXCLUSIVE)
+        } catch (e: DeadlockException) {
+            deadlockDetected.set(true)
+            lm.releaseAll(e.victimTxnId)
+        }
+
+        t1.join(2000)
+        deadlockDetected.get() shouldBe true
+        lm.releaseAll(txnId = 1)
+        lm.releaseAll(txnId = 2)
+    }
+
+    @Test
+    fun `3 트랜잭션 순환 대기 시 데드락을 감지한다`() {
+        val targetA = LockTarget("t", RID(1, 0))
+        val targetB = LockTarget("t", RID(1, 1))
+        val targetC = LockTarget("t", RID(1, 2))
+        val deadlockDetected = AtomicBoolean(false)
+        val t1Ready = CountDownLatch(1)
+        val t2Ready = CountDownLatch(1)
+
+        lm.acquire(txnId = 1, target = targetA, mode = LockMode.EXCLUSIVE)
+        lm.acquire(txnId = 2, target = targetB, mode = LockMode.EXCLUSIVE)
+        lm.acquire(txnId = 3, target = targetC, mode = LockMode.EXCLUSIVE)
+
+        val t1 = Thread {
+            t1Ready.countDown()
+            try {
+                lm.acquire(txnId = 1, target = targetB, mode = LockMode.EXCLUSIVE)
+            } catch (e: DeadlockException) {
+                deadlockDetected.set(true)
+            }
+        }
+        t1.start()
+        t1Ready.await()
+        Thread.sleep(50)
+
+        val t2 = Thread {
+            t2Ready.countDown()
+            try {
+                lm.acquire(txnId = 2, target = targetC, mode = LockMode.EXCLUSIVE)
+            } catch (e: DeadlockException) {
+                deadlockDetected.set(true)
+            }
+        }
+        t2.start()
+        t2Ready.await()
+        Thread.sleep(50)
+
+        try {
+            lm.acquire(txnId = 3, target = targetA, mode = LockMode.EXCLUSIVE)
+        } catch (e: DeadlockException) {
+            deadlockDetected.set(true)
+            lm.releaseAll(e.victimTxnId)
+        }
+
+        t1.join(2000)
+        t2.join(2000)
+        deadlockDetected.get() shouldBe true
+        lm.releaseAll(txnId = 1)
+        lm.releaseAll(txnId = 2)
+        lm.releaseAll(txnId = 3)
+    }
 }
