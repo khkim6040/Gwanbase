@@ -3,6 +3,7 @@ package gwanbase.sql
 import gwanbase.execution.ExpressionEvaluator
 import gwanbase.execution.Planner
 import gwanbase.table.*
+import gwanbase.txn.DatabaseSession
 
 /**
  * SQL 실행 결과.
@@ -45,9 +46,12 @@ sealed class ExecuteResult {
  *
  * @param database 대상 데이터베이스
  */
-class SqlExecutor(private val database: Database) {
+class SqlExecutor(
+    private val database: Database,
+    private val session: DatabaseSession? = null,
+) {
 
-    private val planner = Planner(database)
+    private val planner = Planner(database, session)
 
     /**
      * SQL 문을 실행한다.
@@ -121,7 +125,8 @@ class SqlExecutor(private val database: Database) {
         }
 
         val tuple = Tuple(schema, valuesArray)
-        val rid = database.insertTuple(stmt.tableName, tuple)
+        val rid = session?.insertTupleWithLock(stmt.tableName, tuple)
+            ?: database.insertTuple(stmt.tableName, tuple)
         return ExecuteResult.Inserted(rid)
     }
 
@@ -166,6 +171,8 @@ class SqlExecutor(private val database: Database) {
         val schema = tableInfo.schema
 
         // 스캔 + 필터 → 리스트로 수집 (반복 중 변경 방지)
+        // UPDATE/DELETE 스캔은 잠금 없이 수행하고, 변경 시점에 X 잠금을 획득한다.
+        // 스캔 시 S 잠금을 걸면 이후 X 업그레이드에서 데드락이 발생할 수 있다.
         val matches = mutableListOf<Pair<RID, Tuple>>()
         val iter = database.scanTable(stmt.tableName)
         while (iter.hasNext()) {
@@ -185,7 +192,8 @@ class SqlExecutor(private val database: Database) {
                 newValues[colIndex] = coerceValue(rawValue, schema.column(colIndex).type)
             }
             val newTuple = Tuple(schema, newValues)
-            database.updateTuple(stmt.tableName, rid, newTuple)
+            session?.updateTupleWithLock(stmt.tableName, rid, newTuple)
+                ?: database.updateTuple(stmt.tableName, rid, newTuple)
         }
 
         return ExecuteResult.Updated(matches.size)
@@ -201,6 +209,7 @@ class SqlExecutor(private val database: Database) {
         val tableInfo = database.getTable(stmt.tableName)!!
         val schema = tableInfo.schema
 
+        // UPDATE와 동일한 이유로 스캔은 잠금 없이 수행하고, 삭제 시점에 X 잠금을 획득한다.
         val toDelete = mutableListOf<RID>()
         val iter = database.scanTable(stmt.tableName)
         while (iter.hasNext()) {
@@ -211,7 +220,8 @@ class SqlExecutor(private val database: Database) {
         }
 
         for (rid in toDelete) {
-            database.deleteTuple(stmt.tableName, rid)
+            session?.deleteTupleWithLock(stmt.tableName, rid)
+                ?: database.deleteTuple(stmt.tableName, rid)
         }
 
         return ExecuteResult.Deleted(toDelete.size)

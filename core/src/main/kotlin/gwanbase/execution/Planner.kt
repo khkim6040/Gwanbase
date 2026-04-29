@@ -2,6 +2,7 @@ package gwanbase.execution
 
 import gwanbase.sql.*
 import gwanbase.table.Database
+import gwanbase.txn.DatabaseSession
 
 /**
  * AST Statement를 연산자 트리로 변환한다.
@@ -20,13 +21,16 @@ import gwanbase.table.Database
  *
  * @param database 대상 데이터베이스
  */
-class Planner(private val database: Database) {
+class Planner(
+    private val database: Database,
+    private val session: DatabaseSession? = null,
+) {
 
     /**
      * SELECT 문을 연산자 트리로 변환한다.
      */
     fun planSelect(stmt: Statement.Select): Operator {
-        var op: Operator = SeqScanOperator(database, stmt.tableName)
+        var op: Operator = SeqScanOperator(database, stmt.tableName, session)
 
         // WHERE → Filter
         if (stmt.where != null) {

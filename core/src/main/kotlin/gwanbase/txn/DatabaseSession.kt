@@ -2,6 +2,8 @@ package gwanbase.txn
 
 import gwanbase.sql.*
 import gwanbase.table.Database
+import gwanbase.table.RID
+import gwanbase.table.Tuple
 import gwanbase.wal.LogRecord
 import gwanbase.wal.TransactionContext
 
@@ -17,7 +19,7 @@ class DatabaseSession(
 ) : AutoCloseable {
 
     private var currentTxn: TransactionContext? = null
-    private val sqlExecutor: SqlExecutor = SqlExecutor(database)
+    private val sqlExecutor: SqlExecutor = SqlExecutor(database, session = this)
 
     /**
      * SQL 문을 실행한다.
@@ -78,6 +80,46 @@ class DatabaseSession(
     fun rollback() {
         val txn = currentTxn ?: error("활성 트랜잭션이 없다")
         abortInternal(txn)
+    }
+
+    /** 테이블 스캔 시 각 행에 S 잠금을 획득하는 래퍼. */
+    internal fun scanTableWithLock(tableName: String): Iterator<Pair<RID, Tuple>> {
+        val txn = currentTxn
+        val rawIter = database.scanTable(tableName)
+        if (txn == null) return rawIter
+        return object : Iterator<Pair<RID, Tuple>> {
+            override fun hasNext() = rawIter.hasNext()
+            override fun next(): Pair<RID, Tuple> {
+                val (rid, tuple) = rawIter.next()
+                lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.SHARED)
+                return rid to tuple
+            }
+        }
+    }
+
+    /** INSERT 시 삽입된 행에 X 잠금을 획득하는 래퍼. */
+    internal fun insertTupleWithLock(tableName: String, tuple: Tuple): RID {
+        val rid = database.insertTuple(tableName, tuple)
+        currentTxn?.let { txn ->
+            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE)
+        }
+        return rid
+    }
+
+    /** DELETE 시 대상 행에 X 잠금을 획득하는 래퍼. */
+    internal fun deleteTupleWithLock(tableName: String, rid: RID): Boolean {
+        currentTxn?.let { txn ->
+            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE)
+        }
+        return database.deleteTuple(tableName, rid)
+    }
+
+    /** UPDATE 시 대상 행에 X 잠금을 획득하는 래퍼. */
+    internal fun updateTupleWithLock(tableName: String, rid: RID, tuple: Tuple): RID {
+        currentTxn?.let { txn ->
+            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE)
+        }
+        return database.updateTuple(tableName, rid, tuple)
     }
 
     override fun close() {
