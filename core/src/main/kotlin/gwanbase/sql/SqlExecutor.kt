@@ -182,18 +182,27 @@ class SqlExecutor(
             }
         }
 
-        for ((rid, tuple) in matches) {
+        for ((rid, _) in matches) {
+            // X 잠금 획득 후 최신 튜플을 다시 읽어 Lost Update를 방지한다.
+            // 잠금 없이 스캔한 튜플은 stale할 수 있으므로, 잠금 획득 후 재조회한다.
+            if (session != null) {
+                session.acquireExclusiveLock(stmt.tableName, rid)
+            }
+            val freshTuple = database.getTuple(stmt.tableName, rid) ?: continue
             val newValues = Array<Any?>(schema.columnCount) { i ->
-                ExpressionEvaluator.getTupleValue(tuple, i, schema.column(i).type)
+                ExpressionEvaluator.getTupleValue(freshTuple, i, schema.column(i).type)
             }
             for (assignment in stmt.assignments) {
                 val colIndex = schema.columnIndex(assignment.column)
-                val rawValue = ExpressionEvaluator.evaluate(schema, tuple, assignment.value)
+                val rawValue = ExpressionEvaluator.evaluate(schema, freshTuple, assignment.value)
                 newValues[colIndex] = coerceValue(rawValue, schema.column(colIndex).type)
             }
             val newTuple = Tuple(schema, newValues)
-            session?.updateTupleWithLock(stmt.tableName, rid, newTuple)
-                ?: database.updateTuple(stmt.tableName, rid, newTuple)
+            if (session != null) {
+                session.updateTupleWithLockAlreadyHeld(stmt.tableName, rid, newTuple)
+            } else {
+                database.updateTuple(stmt.tableName, rid, newTuple)
+            }
         }
 
         return ExecuteResult.Updated(matches.size)

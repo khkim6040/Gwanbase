@@ -122,6 +122,18 @@ class DatabaseSession(
         return database.updateTuple(tableName, rid, tuple)
     }
 
+    /** X 잠금만 획득하고 실제 업데이트는 하지 않는다. 잠금 후 재조회를 위해 사용한다. */
+    internal fun acquireExclusiveLock(tableName: String, rid: RID) {
+        currentTxn?.let { txn ->
+            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE)
+        }
+    }
+
+    /** 이미 X 잠금을 보유한 상태에서 튜플을 업데이트한다. WAL 로깅은 정상적으로 수행된다. */
+    internal fun updateTupleWithLockAlreadyHeld(tableName: String, rid: RID, tuple: Tuple): RID {
+        return database.updateTuple(tableName, rid, tuple)
+    }
+
     override fun close() {
         if (currentTxn != null) {
             abortInternal(currentTxn!!)
