@@ -1,16 +1,17 @@
 package gwanbase.table
 
 import gwanbase.sql.ExecuteResult
-import gwanbase.sql.SqlExecutor
 import gwanbase.storage.BufferPoolManager
 import gwanbase.storage.DiskManager
+import gwanbase.txn.DatabaseSession
+import gwanbase.txn.LockManager
 import gwanbase.wal.LogManager
-import gwanbase.wal.LogRecord
 import gwanbase.wal.RecoveryManager
 import gwanbase.wal.TransactionContext
 import gwanbase.wal.WalCallbackImpl
 import java.nio.ByteOrder
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Phase 2 데이터베이스 진입점.
@@ -26,15 +27,15 @@ import java.nio.file.Path
  */
 class Database private constructor(
     private val diskManager: DiskManager,
-    private val bpm: BufferPoolManager,
+    internal val bpm: BufferPoolManager,
     private val catalog: Catalog,
-    private val logManager: LogManager?,
+    internal val logManager: LogManager?,
 ) : AutoCloseable {
 
     private var closed = false
-    private val sqlExecutor: SqlExecutor = SqlExecutor(this)
-    private var currentTxn: TransactionContext? = null
-    private var nextTxnId: Int = 0
+    internal val nextTxnId = AtomicInteger(0)
+    internal val lockManager = LockManager()
+    internal val currentTxnHolder = ThreadLocal<TransactionContext?>()
 
     companion object {
         const val METADATA_PAGE_ID = 0
@@ -74,10 +75,10 @@ class Database private constructor(
                 }
 
                 val db = Database(dm, bpm, recoveredCatalog, logManager)
-                db.nextTxnId = nextTxnId
+                db.nextTxnId.set(nextTxnId)
 
                 // WAL 콜백 연결 (recovery 완료 후)
-                bpm.walCallback = WalCallbackImpl(logManager) { db.currentTxn }
+                bpm.walCallback = WalCallbackImpl(logManager) { db.currentTxnHolder.get() }
 
                 return db
             } catch (e: Throwable) {
@@ -214,71 +215,24 @@ class Database private constructor(
     }
 
     /**
-     * SQL 문을 auto-commit 트랜잭션으로 실행한다.
+     * 새 데이터베이스 세션을 생성한다.
      */
-    fun executeSql(sql: String): ExecuteResult {
-        beginTransaction()
-        try {
-            val result = sqlExecutor.execute(sql)
-            commitTransaction()
-            return result
-        } catch (e: Throwable) {
-            abortTransaction()
-            throw e
-        }
+    fun createSession(): DatabaseSession {
+        checkOpen()
+        return DatabaseSession(this, lockManager)
     }
 
-    private fun beginTransaction() {
-        val txnId = nextTxnId++
-        val txn = TransactionContext(txnId)
-        val lm = logManager
-        if (lm != null) {
-            txn.lastLsn = lm.appendBegin(txnId)
-        }
-        currentTxn = txn
-    }
-
-    private fun commitTransaction() {
-        val txn = currentTxn ?: return
-        val lm = logManager
-        if (lm != null) {
-            val commitLsn = lm.appendCommit(txn.txnId, txn.lastLsn)
-            lm.flush(commitLsn)
-        }
-        currentTxn = null
-    }
+    /** 트랜잭션 ID를 할당한다. */
+    internal fun allocateTxnId(): Int = nextTxnId.getAndIncrement()
 
     /**
-     * 트랜잭션을 중단하고 dirty page의 before-image를 복원한다.
+     * SQL 문을 auto-commit 트랜잭션으로 실행한다.
      *
-     * currentTxn을 먼저 null로 설정하여 복원 중 WalCallback이 추가 로그를 기록하지 않도록 한다.
+     * 내부적으로 임시 세션을 생성하여 실행하므로 기존 호출자는 변경 없이 사용 가능하다.
      */
-    private fun abortTransaction() {
-        val txn = currentTxn ?: return
-        currentTxn = null // WalCallback 비활성화 (txnProvider() → null)
-        val lm = logManager
-        if (lm != null) {
-            // Runtime undo: Update 로그의 before-image를 버퍼 풀에 복원
-            var lsn = txn.lastLsn
-            while (lsn >= 0) {
-                val record = lm.getRecord(lsn)
-                when (record) {
-                    is LogRecord.Update -> {
-                        val page = bpm.fetchPage(record.pageId)
-                        if (page != null) {
-                            page.data.clear()
-                            page.data.put(record.beforeImage)
-                            page.data.flip()
-                            bpm.unpinPage(record.pageId, isDirty = true)
-                        }
-                        lsn = record.prevLsn
-                    }
-                    is LogRecord.Begin -> break
-                    else -> lsn = record.prevLsn
-                }
-            }
-            val abortLsn = lm.appendAbort(txn.txnId, txn.lastLsn)
-            lm.flush(abortLsn)
+    fun executeSql(sql: String): ExecuteResult {
+        return createSession().use { session ->
+            session.executeSql(sql)
         }
     }
 
@@ -293,7 +247,6 @@ class Database private constructor(
 
     override fun close() {
         if (closed) return
-        check(currentTxn == null) { "활성 트랜잭션이 있는 상태에서 Database를 닫을 수 없다" }
         bpm.flushAllPages()
         logManager?.let { lm ->
             lm.appendCheckpoint()

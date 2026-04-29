@@ -67,7 +67,7 @@ class SqlExecutor(private val database: Database) {
 
     // ── 문(statement) 실행 ──
 
-    private fun executeStatement(stmt: Statement): ExecuteResult {
+    internal fun executeStatement(stmt: Statement): ExecuteResult {
         return when (stmt) {
             is Statement.CreateTable -> executeCreateTable(stmt)
             is Statement.DropTable -> executeDropTable(stmt)
