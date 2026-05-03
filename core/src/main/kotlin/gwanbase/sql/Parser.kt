@@ -230,7 +230,7 @@ class Parser(private val tokens: List<Token>) {
         expect(TokenType.SELECT, "SELECT 키워드가 필요하다")
         val columns = parseSelectList()
         expect(TokenType.FROM, "FROM 키워드가 필요하다")
-        val tableName = expectIdentifier("테이블 이름이 필요하다")
+        val from = parseFromClause()
 
         // WHERE
         val where = if (peek().type == TokenType.WHERE) {
@@ -256,7 +256,39 @@ class Parser(private val tokens: List<Token>) {
             null
         }
 
-        return Statement.Select(columns, FromClause.Table(tableName), where, orderBy, limit)
+        return Statement.Select(columns, from, where, orderBy, limit)
+    }
+
+    /**
+     * FROM 절을 파싱한다. JOIN 체이닝을 지원한다.
+     *
+     * 문법: tableRef [JOIN tableRef ON expr]*
+     */
+    private fun parseFromClause(): FromClause {
+        var left: FromClause = parseTableRef()
+        while (peek().type == TokenType.JOIN) {
+            advance() // JOIN
+            val right = parseTableRef()
+            expect(TokenType.ON, "ON 키워드가 필요하다")
+            val condition = parseExpression(0)
+            left = FromClause.Join(left, right, condition)
+        }
+        return left
+    }
+
+    /**
+     * 테이블 참조를 파싱한다. 선택적 별칭을 지원한다.
+     *
+     * 문법: tableName [alias]
+     */
+    private fun parseTableRef(): FromClause.Table {
+        val tableName = expectIdentifier("테이블 이름이 필요하다")
+        val alias = if (peek().type == TokenType.IDENTIFIER) {
+            advance().literal
+        } else {
+            null
+        }
+        return FromClause.Table(tableName, alias)
     }
 
     /**
@@ -452,7 +484,13 @@ class Parser(private val tokens: List<Token>) {
             }
             TokenType.IDENTIFIER -> {
                 advance()
-                Expression.ColumnRef(null, token.literal)
+                if (peek().type == TokenType.DOT) {
+                    advance() // DOT
+                    val colName = expectIdentifier("컬럼 이름이 필요하다")
+                    Expression.ColumnRef(token.literal, colName)
+                } else {
+                    Expression.ColumnRef(null, token.literal)
+                }
             }
             else -> throw ParseException(
                 "표현식이 필요하다, 발견: '${token.literal}'",
