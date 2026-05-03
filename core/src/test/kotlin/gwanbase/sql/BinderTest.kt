@@ -166,4 +166,127 @@ class BinderTest {
         }
         ex.message shouldContain "nonexistent"
     }
+
+    // ── JOIN 다중 테이블 바인딩 ──
+
+    @Test
+    fun `JOIN 양쪽 테이블 컬럼 검증 통과`() {
+        database.createTable("orders", Schema(listOf(
+            Column("order_id", DataType.INT32, nullable = false),
+            Column("user_id", DataType.INT32, nullable = false),
+            Column("amount", DataType.INT32),
+        )))
+        val freshBinder = Binder(database.getCatalog())
+        val stmt = parse("SELECT u.id, o.amount FROM users u JOIN orders o ON u.id = o.user_id")
+        val result = freshBinder.bind(stmt)
+        result shouldBe stmt
+    }
+
+    @Test
+    fun `JOIN에서 존재하지 않는 컬럼 참조 시 에러`() {
+        database.createTable("orders", Schema(listOf(
+            Column("order_id", DataType.INT32, nullable = false),
+            Column("user_id", DataType.INT32, nullable = false),
+        )))
+        val freshBinder = Binder(database.getCatalog())
+        val ex = assertThrows<BindException> {
+            freshBinder.bind(parse("SELECT u.nonexistent FROM users u JOIN orders o ON u.id = o.user_id"))
+        }
+        ex.message shouldContain "nonexistent"
+    }
+
+    @Test
+    fun `비한정 컬럼이 한쪽 테이블에만 존재하면 통과`() {
+        database.createTable("orders", Schema(listOf(
+            Column("order_id", DataType.INT32, nullable = false),
+            Column("user_id", DataType.INT32, nullable = false),
+        )))
+        val freshBinder = Binder(database.getCatalog())
+        // 'name'은 users에만 존재 → 통과
+        val stmt = parse("SELECT name FROM users u JOIN orders o ON u.id = o.user_id")
+        val result = freshBinder.bind(stmt)
+        result shouldBe stmt
+    }
+
+    @Test
+    fun `비한정 컬럼이 양쪽 테이블에 존재하면 ambiguous 에러`() {
+        database.createTable("orders", Schema(listOf(
+            Column("id", DataType.INT32, nullable = false),
+            Column("user_id", DataType.INT32, nullable = false),
+        )))
+        val freshBinder = Binder(database.getCatalog())
+        // 'id'는 users와 orders 양쪽에 존재 → ambiguous
+        val ex = assertThrows<BindException> {
+            freshBinder.bind(parse("SELECT id FROM users u JOIN orders o ON u.id = o.user_id"))
+        }
+        ex.message shouldContain "모호"
+    }
+
+    @Test
+    fun `JOIN에서 존재하지 않는 테이블 참조 시 에러`() {
+        val ex = assertThrows<BindException> {
+            binder.bind(parse("SELECT * FROM users u JOIN nonexistent n ON u.id = n.user_id"))
+        }
+        ex.message shouldContain "nonexistent"
+    }
+
+    @Test
+    fun `JOIN에서 잘못된 테이블 한정자 사용 시 에러`() {
+        database.createTable("orders", Schema(listOf(
+            Column("order_id", DataType.INT32, nullable = false),
+            Column("user_id", DataType.INT32, nullable = false),
+        )))
+        val freshBinder = Binder(database.getCatalog())
+        val ex = assertThrows<BindException> {
+            freshBinder.bind(parse("SELECT x.id FROM users u JOIN orders o ON u.id = o.user_id"))
+        }
+        ex.message shouldContain "x"
+    }
+
+    // ── CREATE INDEX / ANALYZE 바인딩 ──
+
+    @Test
+    fun `CREATE INDEX 존재하는 테이블과 컬럼이면 통과`() {
+        val stmt = parse("CREATE INDEX idx_age ON users (age)")
+        val result = binder.bind(stmt)
+        result shouldBe stmt
+    }
+
+    @Test
+    fun `CREATE INDEX 존재하지 않는 테이블이면 에러`() {
+        val ex = assertThrows<BindException> {
+            binder.bind(parse("CREATE INDEX idx ON nonexistent (col)"))
+        }
+        ex.message shouldContain "nonexistent"
+    }
+
+    @Test
+    fun `CREATE INDEX 존재하지 않는 컬럼이면 에러`() {
+        val ex = assertThrows<BindException> {
+            binder.bind(parse("CREATE INDEX idx ON users (nonexistent)"))
+        }
+        ex.message shouldContain "nonexistent"
+    }
+
+    @Test
+    fun `ANALYZE 존재하는 테이블이면 통과`() {
+        val stmt = parse("ANALYZE users")
+        val result = binder.bind(stmt)
+        result shouldBe stmt
+    }
+
+    @Test
+    fun `ANALYZE 존재하지 않는 테이블이면 에러`() {
+        val ex = assertThrows<BindException> {
+            binder.bind(parse("ANALYZE nonexistent"))
+        }
+        ex.message shouldContain "nonexistent"
+    }
+
+    @Test
+    fun `EXPLAIN 내부 문이 바인딩된다`() {
+        val stmt = parse("EXPLAIN SELECT * FROM users")
+        val result = binder.bind(stmt)
+        result shouldBe stmt
+    }
 }
