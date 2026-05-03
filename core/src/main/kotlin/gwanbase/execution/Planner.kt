@@ -63,7 +63,10 @@ class Planner(
         is PlanNode.NestedLoopJoin -> {
             val outer = toOperator(plan.outer)
             val inner = toOperator(plan.inner)
-            val combinedSchema = Schema(outer.outputSchema.columns + inner.outputSchema.columns)
+            val combinedSchema = buildJoinSchema(
+                outer.outputSchema, inner.outputSchema,
+                extractTableName(plan.outer), extractTableName(plan.inner),
+            )
             NestedLoopJoinOperator(outer, inner, plan.condition, combinedSchema)
         }
         is PlanNode.Sort -> SortOperator(toOperator(plan.child), plan.column, plan.ascending)
@@ -99,6 +102,50 @@ class Planner(
         op = ProjectOperator(op, stmt.columns)
 
         return op
+    }
+
+    /**
+     * JOIN 결합 스키마를 생성한다. 동일 이름 컬럼은 "테이블명.컬럼명" 형식으로 변환한다.
+     *
+     * 예: outer(id, name) + inner(id, value) → (t1.id, name, t2.id, value)
+     * 동일 이름이 아닌 컬럼은 기존 이름을 유지하여 하위 호환을 보장한다.
+     */
+    private fun buildJoinSchema(
+        outerSchema: Schema,
+        innerSchema: Schema,
+        outerTable: String?,
+        innerTable: String?,
+    ): Schema {
+        val outerNames = outerSchema.columns.map { it.name }.toSet()
+        val innerNames = innerSchema.columns.map { it.name }.toSet()
+        val duplicates = outerNames intersect innerNames
+
+        val outerCols = outerSchema.columns.map { col ->
+            if (col.name in duplicates && outerTable != null) {
+                col.copy(name = "$outerTable.${col.name}")
+            } else col
+        }
+        val innerCols = innerSchema.columns.map { col ->
+            if (col.name in duplicates && innerTable != null) {
+                col.copy(name = "$innerTable.${col.name}")
+            } else col
+        }
+        return Schema(outerCols + innerCols)
+    }
+
+    /**
+     * PlanNode에서 테이블 이름을 추출한다.
+     *
+     * 재귀적으로 탐색하여 리프 노드의 테이블 이름을 찾는다.
+     * 중첩 JOIN의 경우 null을 반환한다 (이미 prefix가 적용되어 있을 수 있음).
+     */
+    private fun extractTableName(plan: PlanNode): String? = when (plan) {
+        is PlanNode.SeqScan -> plan.tableName
+        is PlanNode.IndexScan -> plan.tableName
+        is PlanNode.NestedLoopJoin -> null
+        is PlanNode.Sort -> extractTableName(plan.child)
+        is PlanNode.Limit -> extractTableName(plan.child)
+        is PlanNode.Project -> extractTableName(plan.child)
     }
 
     /**

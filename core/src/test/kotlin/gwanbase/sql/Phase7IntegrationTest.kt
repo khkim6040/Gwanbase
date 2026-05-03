@@ -296,6 +296,42 @@ class Phase7IntegrationTest {
     }
 
     @Test
+    fun `동일 컬럼명 테이블 JOIN 시 정상 동작`() {
+        Database.open(tempDir.resolve("dup-col-join.db")).use { db ->
+            db.executeSql("CREATE TABLE t1 (id INT NOT NULL, name VARCHAR(50))")
+            db.executeSql("CREATE TABLE t2 (id INT NOT NULL, value INT NOT NULL)")
+            db.executeSql("INSERT INTO t1 (id, name) VALUES (1, 'a')")
+            db.executeSql("INSERT INTO t1 (id, name) VALUES (2, 'b')")
+            db.executeSql("INSERT INTO t2 (id, value) VALUES (1, 100)")
+            db.executeSql("INSERT INTO t2 (id, value) VALUES (3, 300)")
+
+            val result = db.executeSql(
+                "SELECT t1.name, t2.value FROM t1 JOIN t2 ON t1.id = t2.id"
+            ) as ExecuteResult.Selected
+            result.rows.size shouldBe 1
+            result.rows[0][0] shouldBe "a"
+            result.rows[0][1] shouldBe 100L
+        }
+    }
+
+    @Test
+    fun `동일 컬럼명 테이블 JOIN — SELECT * 정상 동작`() {
+        Database.open(tempDir.resolve("dup-col-join-star.db")).use { db ->
+            db.executeSql("CREATE TABLE t1 (id INT NOT NULL, name VARCHAR(50))")
+            db.executeSql("CREATE TABLE t2 (id INT NOT NULL, value INT NOT NULL)")
+            db.executeSql("INSERT INTO t1 (id, name) VALUES (1, 'a')")
+            db.executeSql("INSERT INTO t2 (id, value) VALUES (1, 100)")
+
+            val result = db.executeSql(
+                "SELECT * FROM t1 JOIN t2 ON t1.id = t2.id"
+            ) as ExecuteResult.Selected
+            result.rows.size shouldBe 1
+            // SELECT *는 4개 컬럼 (t1.id, t1.name, t2.id, t2.value)
+            result.columns.size shouldBe 4
+        }
+    }
+
+    @Test
     fun `UPDATE 후 인덱스 정합성 — 인덱스 컬럼 변경 시 이전 키 제거 및 새 키 삽입`() {
         Database.open(tempDir.resolve("idx-update.db")).use { db ->
             db.executeSql("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50))")
