@@ -28,9 +28,9 @@ class Optimizer(private val catalog: Catalog) {
             val tableName = tables[0].first
             enumerator.bestAccessPath(tableName, stmt.where)
         } else {
-            val joinCondition = extractJoinCondition(stmt.from)
+            val joinConditions = collectJoinConditions(stmt.from)
             val tableNames = tables.map { it.first }
-            enumerator.bestJoinOrder(tableNames, joinCondition ?: stmt.where!!)
+            enumerator.bestJoinOrder(tableNames, joinConditions)
         }
 
         if (stmt.orderBy != null) {
@@ -56,10 +56,12 @@ class Optimizer(private val catalog: Catalog) {
     }
 
     /**
-     * JOIN 절에서 ON 조건을 추출한다.
+     * FROM 절에서 모든 JOIN 조건을 재귀적으로 수집한다.
+     *
+     * 3개 이상 테이블의 JOIN에서 각 JOIN 절의 ON 조건을 빠짐없이 수집한다.
      */
-    private fun extractJoinCondition(from: FromClause): Expression? = when (from) {
-        is FromClause.Table -> null
-        is FromClause.Join -> from.condition
+    private fun collectJoinConditions(from: FromClause): List<Expression> = when (from) {
+        is FromClause.Table -> emptyList()
+        is FromClause.Join -> collectJoinConditions(from.left) + collectJoinConditions(from.right) + from.condition
     }
 }

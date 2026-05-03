@@ -55,26 +55,36 @@ class PlanEnumerator(private val catalog: Catalog) {
      * 다중 테이블의 최적 조인 순서를 결정한다.
      *
      * 2테이블: 양방향 비용 비교. 3+테이블: 행 수 기준 greedy 정렬.
+     * 3개 이상 테이블에서는 모든 조인 조건을 AND로 결합하여 최상위 조인에 배치하고,
+     * 내부 조인은 조건 없이(cross join) 수행한다. 정확성을 보장하되 최적화는 미래 과제로 남긴다.
      *
      * @param tables 조인 대상 테이블 목록
-     * @param joinCondition 조인 조건
+     * @param joinConditions 모든 조인 조건 목록
      * @return 최적 조인 계획
      */
-    fun bestJoinOrder(tables: List<String>, joinCondition: Expression): PlanNode {
+    fun bestJoinOrder(tables: List<String>, joinConditions: List<Expression>): PlanNode {
+        require(joinConditions.isNotEmpty()) { "조인 조건이 하나 이상 필요하다" }
+        val combined = if (joinConditions.size == 1) joinConditions[0]
+        else joinConditions.reduce { acc, expr ->
+            Expression.BinaryOp(acc, BinaryOperator.AND, expr)
+        }
+
         if (tables.size == 1) return bestAccessPath(tables[0], null)
         if (tables.size == 2) {
-            val ab = buildJoin(tables[0], tables[1], joinCondition)
-            val ba = buildJoin(tables[1], tables[0], joinCondition)
+            val ab = buildJoin(tables[0], tables[1], combined)
+            val ba = buildJoin(tables[1], tables[0], combined)
             return if (ab.estimatedCost <= ba.estimatedCost) ab else ba
         }
         // 3+ tables: greedy — 행 수가 작은 테이블부터 outer로 사용
+        // 최상위 조인에만 결합된 전체 조건을 배치하고, 내부 조인은 pass-through
         val sorted = tables.sortedBy { catalog.getRowCount(it) }
         var plan: PlanNode = bestAccessPath(sorted[0], null)
         for (i in 1 until sorted.size) {
             val inner = bestAccessPath(sorted[i], null)
             val cost = CostEstimator.nestedLoopJoinCost(plan.estimatedCost, plan.estimatedRows, inner.estimatedCost)
             val rows = plan.estimatedRows * inner.estimatedRows / max(1, max(plan.estimatedRows, inner.estimatedRows))
-            plan = PlanNode.NestedLoopJoin(plan, inner, joinCondition, rows, cost)
+            val cond = if (i == sorted.size - 1) combined else Expression.BoolLiteral(true)
+            plan = PlanNode.NestedLoopJoin(plan, inner, cond, rows, cost)
         }
         return plan
     }
