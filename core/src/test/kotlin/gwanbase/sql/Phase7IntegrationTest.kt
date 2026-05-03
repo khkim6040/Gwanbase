@@ -191,6 +191,77 @@ class Phase7IntegrationTest {
     }
 
     @Test
+    fun `두 테이블 INNER JOIN SQL 실행`() {
+        Database.open(tempDir.resolve("join.db")).use { db ->
+            db.executeSql("CREATE TABLE users (id INT NOT NULL, name VARCHAR(50))")
+            db.executeSql("CREATE TABLE orders (oid INT NOT NULL, user_id INT NOT NULL, amount INT NOT NULL)")
+            db.executeSql("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+            db.executeSql("INSERT INTO users (id, name) VALUES (2, 'Bob')")
+            db.executeSql("INSERT INTO orders (oid, user_id, amount) VALUES (10, 1, 100)")
+            db.executeSql("INSERT INTO orders (oid, user_id, amount) VALUES (11, 1, 200)")
+            db.executeSql("INSERT INTO orders (oid, user_id, amount) VALUES (12, 2, 300)")
+
+            val result = db.executeSql(
+                "SELECT * FROM users JOIN orders ON users.id = orders.user_id"
+            ) as ExecuteResult.Selected
+            result.rows.size shouldBe 3
+        }
+    }
+
+    @Test
+    fun `인덱스 유지보수 — INSERT 후 인덱스 경유 조회`() {
+        Database.open(tempDir.resolve("idx-insert.db")).use { db ->
+            db.executeSql("CREATE TABLE t (id INT NOT NULL, val VARCHAR(50))")
+            db.executeSql("CREATE INDEX idx_id ON t (id)")
+            repeat(50) { db.executeSql("INSERT INTO t (id, val) VALUES ($it, 'v$it')") }
+            db.executeSql("ANALYZE t")
+            val result = db.executeSql("SELECT val FROM t WHERE id = 25") as ExecuteResult.Selected
+            result.rows.size shouldBe 1
+            result.rows[0][0] shouldBe "v25"
+        }
+    }
+
+    @Test
+    fun `DELETE 후 인덱스 정합성`() {
+        Database.open(tempDir.resolve("idx-delete.db")).use { db ->
+            db.executeSql("CREATE TABLE t (id INT NOT NULL, val VARCHAR(50))")
+            db.executeSql("CREATE INDEX idx_id ON t (id)")
+            db.executeSql("INSERT INTO t (id, val) VALUES (1, 'a')")
+            db.executeSql("INSERT INTO t (id, val) VALUES (2, 'b')")
+            db.executeSql("DELETE FROM t WHERE id = 1")
+            db.executeSql("ANALYZE t")
+            val result = db.executeSql("SELECT val FROM t WHERE id = 1") as ExecuteResult.Selected
+            result.rows.size shouldBe 0
+        }
+    }
+
+    @Test
+    fun `ANALYZE 후 옵티마이저 계획 변경 확인`() {
+        Database.open(tempDir.resolve("analyze-plan.db")).use { db ->
+            db.executeSql("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50))")
+            repeat(1000) { db.executeSql("INSERT INTO t (id, name) VALUES ($it, 'n$it')") }
+            db.executeSql("CREATE INDEX idx_id ON t (id)")
+            db.executeSql("ANALYZE t")
+            val result = db.executeSql("EXPLAIN SELECT * FROM t WHERE id = 50") as ExecuteResult.Explained
+            result.planText shouldContain "IndexScan"
+        }
+    }
+
+    @Test
+    fun `JOIN EXPLAIN 출력`() {
+        Database.open(tempDir.resolve("join-explain.db")).use { db ->
+            db.executeSql("CREATE TABLE users (id INT NOT NULL, name VARCHAR(50))")
+            db.executeSql("CREATE TABLE orders (oid INT NOT NULL, user_id INT NOT NULL)")
+            db.executeSql("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+            db.executeSql("INSERT INTO orders (oid, user_id) VALUES (10, 1)")
+            val result = db.executeSql(
+                "EXPLAIN SELECT * FROM users JOIN orders ON users.id = orders.user_id"
+            ) as ExecuteResult.Explained
+            result.planText shouldContain "NestedLoopJoin"
+        }
+    }
+
+    @Test
     fun `ANALYZE 후 컬럼 통계 정확성`() {
         database.executeSql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
         database.executeSql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
