@@ -78,4 +78,41 @@ object KeySerializer {
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
         return RID(buf.getInt(), buf.getShort().toInt() and 0xFFFF)
     }
+
+    /**
+     * 인덱스 키에 RID를 붙여 고유 키를 생성한다 (비고유 인덱스 지원).
+     *
+     * 동일한 컬럼 값을 가진 여러 행이 B+Tree에 각각 다른 키로 저장되도록
+     * columnKey 뒤에 RID를 직렬화하여 붙인다.
+     *
+     * @param columnKey 컬럼 값의 직렬화 바이트 배열
+     * @param rid 행 식별자
+     * @return columnKey + serializedRid 복합 키
+     */
+    fun compositeKey(columnKey: ByteArray, rid: RID): ByteArray {
+        return columnKey + serializeRid(rid)
+    }
+
+    /**
+     * 등가 조건 스캔의 종료 키를 생성한다.
+     *
+     * columnKey 접두사를 공유하는 모든 복합 키를 포함하도록
+     * columnKey의 다음 키(lexicographic successor)를 반환한다.
+     *
+     * @param columnKey 등가 조건의 컬럼 값 바이트 배열
+     * @return columnKey보다 큰 가장 작은 접두사 바이트 배열
+     */
+    fun equalityScanEnd(columnKey: ByteArray): ByteArray {
+        val end = columnKey.copyOf()
+        for (i in end.indices.reversed()) {
+            val next = (end[i].toInt() and 0xFF) + 1
+            if (next <= 0xFF) {
+                end[i] = next.toByte()
+                return end
+            }
+            end[i] = 0
+        }
+        // 전부 0xFF인 경우: 한 바이트 더 긴 배열 반환
+        return columnKey + byteArrayOf(0)
+    }
 }

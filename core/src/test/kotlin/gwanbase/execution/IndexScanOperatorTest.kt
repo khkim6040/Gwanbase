@@ -42,7 +42,7 @@ class IndexScanOperatorTest {
     }
 
     /**
-     * id 컬럼에 대한 B+Tree 인덱스를 수동으로 구축한다.
+     * id 컬럼에 대한 B+Tree 인덱스를 수동으로 구축한다 (복합 키 사용).
      */
     private fun buildIdIndex(): BPlusTree {
         val tree = BPlusTree.createNew(database.bpm)
@@ -51,8 +51,9 @@ class IndexScanOperatorTest {
         while (iter.hasNext()) {
             val (rid, tuple) = iter.next()
             val value = ExpressionEvaluator.getTupleValue(tuple, 0, schema.column(0).type) ?: continue
+            val columnKey = KeySerializer.serializeKey(value, DataType.INT32)
             tree.insert(
-                KeySerializer.serializeKey(value, DataType.INT32),
+                KeySerializer.compositeKey(columnKey, rid),
                 KeySerializer.serializeRid(rid),
             )
         }
@@ -133,6 +134,52 @@ class IndexScanOperatorTest {
         op.open()
         op.next() shouldBe null
         op.close()
+    }
+
+    @Test
+    fun `비고유 인덱스 — 동일 키 값의 여러 행 반환`() {
+        // score 컬럼에 동일 값을 가진 여러 행 삽입
+        insertStudent(1, "Alice", 90)
+        insertStudent(2, "Bob", 90)
+        insertStudent(3, "Charlie", 80)
+        insertStudent(4, "Diana", 90)
+
+        // score 컬럼(인덱스 2)에 대한 인덱스 구축
+        val schema = database.getTable("students")!!.schema
+        val tree = BPlusTree.createNew(database.bpm)
+        val iter = database.scanTable("students")
+        while (iter.hasNext()) {
+            val (rid, tuple) = iter.next()
+            val value = ExpressionEvaluator.getTupleValue(tuple, 2, schema.column(2).type) ?: continue
+            val columnKey = KeySerializer.serializeKey(value, DataType.INT32)
+            tree.insert(
+                KeySerializer.compositeKey(columnKey, rid),
+                KeySerializer.serializeRid(rid),
+            )
+        }
+
+        val op = IndexScanOperator(
+            database = database,
+            tableName = "students",
+            schema = schema,
+            tree = tree,
+            indexColumnIndex = 2,
+            indexColumnType = DataType.INT32,
+            lookupKeySupplier = { 90 },
+            remainingFilter = null,
+        )
+
+        op.open()
+        val results = mutableListOf<String>()
+        var t = op.next()
+        while (t != null) {
+            results.add(t.getString(1)!!)
+            t = op.next()
+        }
+        op.close()
+
+        results.size shouldBe 3
+        results.sorted() shouldBe listOf("Alice", "Bob", "Diana")
     }
 
     @Test

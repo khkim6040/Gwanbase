@@ -33,13 +33,15 @@ class IndexScanOperator(
             matchedRids = emptyList<RID>().iterator()
             return
         }
-        val keyBytes = KeySerializer.serializeKey(lookupValue, indexColumnType)
-        val resultBytes = tree.search(keyBytes)
-        if (resultBytes != null) {
-            matchedRids = listOf(KeySerializer.deserializeRid(resultBytes)).iterator()
-        } else {
-            matchedRids = emptyList<RID>().iterator()
+        val columnKey = KeySerializer.serializeKey(lookupValue, indexColumnType)
+        val endKey = KeySerializer.equalityScanEnd(columnKey)
+        val scanIter = tree.scan(columnKey, endKey)
+        val rids = mutableListOf<RID>()
+        while (scanIter.hasNext()) {
+            val (_, value) = scanIter.next()
+            rids.add(KeySerializer.deserializeRid(value))
         }
+        matchedRids = rids.iterator()
     }
 
     override fun next(): Tuple? {

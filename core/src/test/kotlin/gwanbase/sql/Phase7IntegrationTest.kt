@@ -68,19 +68,22 @@ class Phase7IntegrationTest {
         val indexInfo = database.getCatalog().getIndex("idx_users_id")!!
         val tree = database.getIndexTree(indexInfo)
 
-        // 각 키가 인덱스에 존재하는지 확인
-        val key1 = KeySerializer.serializeKey(1, DataType.INT32)
-        tree.search(key1) shouldNotBe null
+        // 각 키가 인덱스에 존재하는지 확인 (복합 키이므로 scan으로 검증)
+        fun scanCount(value: Int): Int {
+            val columnKey = KeySerializer.serializeKey(value, DataType.INT32)
+            val endKey = KeySerializer.equalityScanEnd(columnKey)
+            val iter = tree.scan(columnKey, endKey)
+            var count = 0
+            while (iter.hasNext()) { iter.next(); count++ }
+            return count
+        }
 
-        val key2 = KeySerializer.serializeKey(2, DataType.INT32)
-        tree.search(key2) shouldNotBe null
-
-        val key3 = KeySerializer.serializeKey(3, DataType.INT32)
-        tree.search(key3) shouldNotBe null
+        scanCount(1) shouldBe 1
+        scanCount(2) shouldBe 1
+        scanCount(3) shouldBe 1
 
         // 존재하지 않는 키
-        val key999 = KeySerializer.serializeKey(999, DataType.INT32)
-        tree.search(key999) shouldBe null
+        scanCount(999) shouldBe 0
     }
 
     @Test
@@ -96,16 +99,22 @@ class Phase7IntegrationTest {
         val indexInfo = database.getCatalog().getIndex("idx_users_id")!!
         val tree = database.getIndexTree(indexInfo)
 
+        // 복합 키이므로 scan으로 검증
+        fun scanCount(value: Int): Int {
+            val columnKey = KeySerializer.serializeKey(value, DataType.INT32)
+            val endKey = KeySerializer.equalityScanEnd(columnKey)
+            val iter = tree.scan(columnKey, endKey)
+            var count = 0
+            while (iter.hasNext()) { iter.next(); count++ }
+            return count
+        }
+
         // id=2는 인덱스에서 제거되어야 함
-        val key2 = KeySerializer.serializeKey(2, DataType.INT32)
-        tree.search(key2) shouldBe null
+        scanCount(2) shouldBe 0
 
         // id=1, 3은 여전히 존재해야 함
-        val key1 = KeySerializer.serializeKey(1, DataType.INT32)
-        tree.search(key1) shouldNotBe null
-
-        val key3 = KeySerializer.serializeKey(3, DataType.INT32)
-        tree.search(key3) shouldNotBe null
+        scanCount(1) shouldBe 1
+        scanCount(3) shouldBe 1
     }
 
     @Test
@@ -258,6 +267,58 @@ class Phase7IntegrationTest {
                 "EXPLAIN SELECT * FROM users JOIN orders ON users.id = orders.user_id"
             ) as ExecuteResult.Explained
             result.planText shouldContain "NestedLoopJoin"
+        }
+    }
+
+    @Test
+    fun `3테이블 JOIN — 모든 조인 조건이 적용된다`() {
+        Database.open(tempDir.resolve("3join.db")).use { db ->
+            db.executeSql("CREATE TABLE a (a_id INT NOT NULL, a_val VARCHAR(10))")
+            db.executeSql("CREATE TABLE b (b_id INT NOT NULL, b_a_id INT NOT NULL, b_val VARCHAR(10))")
+            db.executeSql("CREATE TABLE c (c_id INT NOT NULL, c_b_id INT NOT NULL, c_val VARCHAR(10))")
+
+            db.executeSql("INSERT INTO a (a_id, a_val) VALUES (1, 'a1')")
+            db.executeSql("INSERT INTO a (a_id, a_val) VALUES (2, 'a2')")
+            db.executeSql("INSERT INTO b (b_id, b_a_id, b_val) VALUES (10, 1, 'b1')")
+            db.executeSql("INSERT INTO b (b_id, b_a_id, b_val) VALUES (20, 2, 'b2')")
+            db.executeSql("INSERT INTO c (c_id, c_b_id, c_val) VALUES (100, 10, 'c1')")
+            db.executeSql("INSERT INTO c (c_id, c_b_id, c_val) VALUES (200, 99, 'c_no_match')")
+
+            val result = db.executeSql(
+                "SELECT a_val, b_val, c_val FROM a JOIN b ON a_id = b_a_id JOIN c ON b_id = c_b_id"
+            ) as ExecuteResult.Selected
+            // a(1)-b(10)-c(100) 만 매칭, c(200)의 c_b_id=99는 불일치
+            result.rows.size shouldBe 1
+            result.rows[0][0] shouldBe "a1"
+            result.rows[0][1] shouldBe "b1"
+            result.rows[0][2] shouldBe "c1"
+        }
+    }
+
+    @Test
+    fun `UPDATE 후 인덱스 정합성 — 인덱스 컬럼 변경 시 이전 키 제거 및 새 키 삽입`() {
+        Database.open(tempDir.resolve("idx-update.db")).use { db ->
+            db.executeSql("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50))")
+            db.executeSql("CREATE INDEX idx_id ON t (id)")
+            db.executeSql("INSERT INTO t (id, name) VALUES (1, 'old')")
+            db.executeSql("ANALYZE t")
+
+            // 비인덱스 컬럼 변경 — 인덱스에 영향 없어야 함
+            db.executeSql("UPDATE t SET name = 'new' WHERE id = 1")
+            val r1 = db.executeSql("SELECT name FROM t WHERE id = 1") as ExecuteResult.Selected
+            r1.rows.size shouldBe 1
+            r1.rows[0][0] shouldBe "new"
+
+            // 인덱스 컬럼 변경 — 이전 키(1) 제거, 새 키(2) 삽입
+            db.executeSql("UPDATE t SET id = 2 WHERE id = 1")
+            db.executeSql("ANALYZE t")
+            val r2 = db.executeSql("SELECT name FROM t WHERE id = 2") as ExecuteResult.Selected
+            r2.rows.size shouldBe 1
+            r2.rows[0][0] shouldBe "new"
+
+            // 이전 키로 조회하면 결과 없음
+            val r3 = db.executeSql("SELECT name FROM t WHERE id = 1") as ExecuteResult.Selected
+            r3.rows.size shouldBe 0
         }
     }
 

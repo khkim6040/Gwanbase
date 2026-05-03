@@ -184,7 +184,7 @@ class Database private constructor(
         val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
         val deleted = heapFile.deleteTuple(rid)
         if (deleted && tuple != null) {
-            maintainIndexesOnDelete(tableName, info.schema, tuple)
+            maintainIndexesOnDelete(tableName, info.schema, tuple, rid)
             catalog.decrementRowCount(tableName)
         }
         return deleted
@@ -231,7 +231,8 @@ class Database private constructor(
         while (iter.hasNext()) {
             val (rid, tuple) = iter.next()
             val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
-            tree.insert(KeySerializer.serializeKey(value, colType), KeySerializer.serializeRid(rid))
+            val columnKey = KeySerializer.serializeKey(value, colType)
+            tree.insert(KeySerializer.compositeKey(columnKey, rid), KeySerializer.serializeRid(rid))
         }
         catalog.createIndex(indexName, tableName, columnName, tree.rootPageId)
     }
@@ -248,13 +249,21 @@ class Database private constructor(
         return catalog.dropTable(name)
     }
 
-    /** 튜플을 업데이트한다. 내부적으로 삭제 후 재삽입한다. */
+    /** 튜플을 업데이트한다. 내부적으로 삭제 후 재삽입하며 인덱스를 유지보수한다. */
     fun updateTuple(tableName: String, rid: RID, tuple: Tuple): RID {
         checkOpen()
         val info = catalog.getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
+        // 이전 튜플을 읽어 인덱스 정리에 사용한다
+        val oldTuple = getTuple(tableName, rid)
         val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
-        return heapFile.updateTuple(rid, tuple.serialize())
+        val newRid = heapFile.updateTuple(rid, tuple.serialize())
+        // 인덱스 유지보수: 이전 키 제거 후 새 키 삽입
+        if (oldTuple != null) {
+            maintainIndexesOnDelete(tableName, info.schema, oldTuple, rid)
+        }
+        maintainIndexesOnInsert(tableName, info.schema, tuple, newRid)
+        return newRid
     }
 
     /** Catalog 인스턴스를 반환한다. Binder에서 스키마 검증용으로 사용한다. */
@@ -315,18 +324,20 @@ class Database private constructor(
             val colType = schema.column(colIndex).type
             val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
             val tree = BPlusTree(bpm, indexInfo.rootPageId)
-            tree.insert(KeySerializer.serializeKey(value, colType), KeySerializer.serializeRid(rid))
+            val columnKey = KeySerializer.serializeKey(value, colType)
+            tree.insert(KeySerializer.compositeKey(columnKey, rid), KeySerializer.serializeRid(rid))
         }
     }
 
     /** DELETE 시 모든 관련 인덱스에서 엔트리를 제거한다. */
-    private fun maintainIndexesOnDelete(tableName: String, schema: Schema, tuple: Tuple) {
+    private fun maintainIndexesOnDelete(tableName: String, schema: Schema, tuple: Tuple, rid: RID) {
         for (indexInfo in catalog.getIndexesForTable(tableName)) {
             val colIndex = schema.columnIndex(indexInfo.columnName)
             val colType = schema.column(colIndex).type
             val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
             val tree = BPlusTree(bpm, indexInfo.rootPageId)
-            tree.delete(KeySerializer.serializeKey(value, colType))
+            val columnKey = KeySerializer.serializeKey(value, colType)
+            tree.delete(KeySerializer.compositeKey(columnKey, rid))
         }
     }
 
