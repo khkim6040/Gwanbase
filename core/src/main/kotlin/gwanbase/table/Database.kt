@@ -1,5 +1,8 @@
 package gwanbase.table
 
+import gwanbase.execution.ExpressionEvaluator
+import gwanbase.index.BPlusTree
+import gwanbase.index.KeySerializer
 import gwanbase.sql.ExecuteResult
 import gwanbase.storage.BufferPoolManager
 import gwanbase.storage.DiskManager
@@ -155,7 +158,10 @@ class Database private constructor(
         val info = catalog.getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
         val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
-        return heapFile.insertTuple(tuple.serialize())
+        val rid = heapFile.insertTuple(tuple.serialize())
+        maintainIndexesOnInsert(tableName, info.schema, tuple, rid)
+        catalog.incrementRowCount(tableName)
+        return rid
     }
 
     /** RID로 튜플을 조회한다. */
@@ -173,8 +179,15 @@ class Database private constructor(
         checkOpen()
         val info = catalog.getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
+        // 삭제 전에 튜플을 읽어 인덱스 정리에 사용한다
+        val tuple = getTuple(tableName, rid)
         val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
-        return heapFile.deleteTuple(rid)
+        val deleted = heapFile.deleteTuple(rid)
+        if (deleted && tuple != null) {
+            maintainIndexesOnDelete(tableName, info.schema, tuple)
+            catalog.decrementRowCount(tableName)
+        }
+        return deleted
     }
 
     /** 테이블의 모든 튜플을 순회하는 iterator를 반환한다. */
@@ -191,6 +204,42 @@ class Database private constructor(
                 return rid to Tuple.deserialize(info.schema, data)
             }
         }
+    }
+
+    // ── 인덱스 관리 ──
+
+    /** 인덱스 메타데이터로 B+Tree를 반환한다. */
+    fun getIndexTree(indexInfo: IndexInfo): BPlusTree {
+        checkOpen()
+        return BPlusTree(bpm, indexInfo.rootPageId)
+    }
+
+    /**
+     * 인덱스를 생성한다.
+     *
+     * 기존 테이블 데이터를 스캔하여 B+Tree를 구축한 뒤 Catalog에 등록한다.
+     */
+    fun createIndex(indexName: String, tableName: String, columnName: String) {
+        checkOpen()
+        val tableInfo = getTable(tableName)
+            ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
+        val schema = tableInfo.schema
+        val colIndex = schema.columnIndex(columnName)
+        val colType = schema.column(colIndex).type
+        val tree = BPlusTree.createNew(bpm)
+        val iter = scanTable(tableName)
+        while (iter.hasNext()) {
+            val (rid, tuple) = iter.next()
+            val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
+            tree.insert(KeySerializer.serializeKey(value, colType), KeySerializer.serializeRid(rid))
+        }
+        catalog.createIndex(indexName, tableName, columnName, tree.rootPageId)
+    }
+
+    /** 인덱스를 삭제한다. */
+    fun dropIndex(indexName: String) {
+        checkOpen()
+        catalog.dropIndex(indexName)
     }
 
     /** 테이블을 삭제한다. 존재하지 않으면 false를 반환한다. */
@@ -255,6 +304,30 @@ class Database private constructor(
         logManager?.close()
         diskManager.close()
         closed = true
+    }
+
+    // ── 인덱스 유지보수 ──
+
+    /** INSERT 시 모든 관련 인덱스에 엔트리를 추가한다. */
+    private fun maintainIndexesOnInsert(tableName: String, schema: Schema, tuple: Tuple, rid: RID) {
+        for (indexInfo in catalog.getIndexesForTable(tableName)) {
+            val colIndex = schema.columnIndex(indexInfo.columnName)
+            val colType = schema.column(colIndex).type
+            val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
+            val tree = BPlusTree(bpm, indexInfo.rootPageId)
+            tree.insert(KeySerializer.serializeKey(value, colType), KeySerializer.serializeRid(rid))
+        }
+    }
+
+    /** DELETE 시 모든 관련 인덱스에서 엔트리를 제거한다. */
+    private fun maintainIndexesOnDelete(tableName: String, schema: Schema, tuple: Tuple) {
+        for (indexInfo in catalog.getIndexesForTable(tableName)) {
+            val colIndex = schema.columnIndex(indexInfo.columnName)
+            val colType = schema.column(colIndex).type
+            val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
+            val tree = BPlusTree(bpm, indexInfo.rootPageId)
+            tree.delete(KeySerializer.serializeKey(value, colType))
+        }
     }
 
     private fun checkOpen() {

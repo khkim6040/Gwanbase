@@ -35,6 +35,18 @@ sealed class ExecuteResult {
 
     /** ROLLBACK 결과. */
     data object TransactionRolledBack : ExecuteResult()
+
+    /** CREATE INDEX 결과. */
+    data class IndexCreated(val indexName: String) : ExecuteResult()
+
+    /** DROP INDEX 결과. */
+    data class IndexDropped(val indexName: String) : ExecuteResult()
+
+    /** ANALYZE 결과. */
+    data class Analyzed(val tableName: String, val rowCount: Long) : ExecuteResult()
+
+    /** EXPLAIN 결과. */
+    data class Explained(val planText: String) : ExecuteResult()
 }
 
 /**
@@ -82,10 +94,16 @@ class SqlExecutor(
             is Statement.Begin -> error("BEGIN은 DatabaseSession에서 처리한다")
             is Statement.Commit -> error("COMMIT은 DatabaseSession에서 처리한다")
             is Statement.Rollback -> error("ROLLBACK은 DatabaseSession에서 처리한다")
-            is Statement.CreateIndex -> TODO("Phase 7에서 구현")
-            is Statement.DropIndex -> TODO("Phase 7에서 구현")
-            is Statement.Analyze -> TODO("Phase 7에서 구현")
-            is Statement.Explain -> TODO("Phase 7에서 구현")
+            is Statement.CreateIndex -> {
+                database.createIndex(stmt.indexName, stmt.tableName, stmt.columnName)
+                ExecuteResult.IndexCreated(stmt.indexName)
+            }
+            is Statement.DropIndex -> {
+                database.dropIndex(stmt.indexName)
+                ExecuteResult.IndexDropped(stmt.indexName)
+            }
+            is Statement.Analyze -> TODO("Task 13에서 구현")
+            is Statement.Explain -> TODO("Task 17에서 구현")
         }
     }
 
