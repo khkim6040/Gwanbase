@@ -359,6 +359,54 @@ class Phase7IntegrationTest {
     }
 
     @Test
+    fun `통계 영속화 — 재시작 후 통계 유지`() {
+        val dbPath = tempDir.resolve("stats-persist.db")
+
+        // 1단계: DB 생성, 데이터 삽입, ANALYZE 실행
+        Database.open(dbPath).use { db ->
+            db.executeSql("CREATE TABLE items (id INT NOT NULL, price INT NOT NULL, name VARCHAR(50))")
+            db.executeSql("INSERT INTO items (id, price, name) VALUES (1, 100, 'apple')")
+            db.executeSql("INSERT INTO items (id, price, name) VALUES (2, 200, 'banana')")
+            db.executeSql("INSERT INTO items (id, price, name) VALUES (3, 300, 'cherry')")
+            db.executeSql("ANALYZE items")
+
+            // ANALYZE 직후 확인
+            val catalog = db.getCatalog()
+            catalog.getRowCount("items") shouldBe 3
+            val idStats = catalog.getColumnStats("items", "id")
+            idStats shouldNotBe null
+            idStats!!.distinctCount shouldBe 3
+        }
+
+        // 2단계: DB 재시작 후 통계가 보존되는지 확인
+        Database.open(dbPath).use { db ->
+            val catalog = db.getCatalog()
+            catalog.getRowCount("items") shouldBe 3
+
+            val idStats = catalog.getColumnStats("items", "id")
+            idStats shouldNotBe null
+            idStats!!.distinctCount shouldBe 3
+            idStats.minValue shouldBe 1L
+            idStats.maxValue shouldBe 3L
+            idStats.nullCount shouldBe 0
+
+            val priceStats = catalog.getColumnStats("items", "price")
+            priceStats shouldNotBe null
+            priceStats!!.distinctCount shouldBe 3
+            priceStats.minValue shouldBe 100L
+            priceStats.maxValue shouldBe 300L
+
+            val nameStats = catalog.getColumnStats("items", "name")
+            nameStats shouldNotBe null
+            nameStats!!.distinctCount shouldBe 3
+            nameStats.nullCount shouldBe 0
+            // VARCHAR는 min/max가 null
+            nameStats.minValue shouldBe null
+            nameStats.maxValue shouldBe null
+        }
+    }
+
+    @Test
     fun `ANALYZE 후 컬럼 통계 정확성`() {
         database.executeSql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
         database.executeSql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")

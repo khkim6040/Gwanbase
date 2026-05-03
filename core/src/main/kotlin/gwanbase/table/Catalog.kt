@@ -161,6 +161,7 @@ class Catalog(
     /** 컬럼 통계를 갱신한다. */
     fun updateColumnStats(tableName: String, columnName: String, stats: ColumnStats) {
         columnStatsMap.getOrPut(tableName) { mutableMapOf() }[columnName] = stats
+        flush()
     }
 
     /** 특정 컬럼의 통계를 조회한다. */
@@ -192,6 +193,19 @@ class Catalog(
             val colNameBytes = idx.columnName.toByteArray(Charsets.UTF_8).size
             size += 4 + 2 + nameBytes + 2 + tableNameBytes + 2 + colNameBytes + 4
             // indexId, nameLen, name, tableNameLen, tableName, colNameLen, colName, rootPageId
+        }
+        // 통계 섹션
+        size += 4 // statsTableCount
+        for ((tableName, colStats) in columnStatsMap) {
+            val tblNameBytes = tableName.toByteArray(Charsets.UTF_8).size
+            size += 2 + tblNameBytes // tableNameLen, tableName
+            size += 8 // rowCount
+            size += 2 // columnStatsCount
+            for ((colName, _) in colStats) {
+                val colNameBytes = colName.toByteArray(Charsets.UTF_8).size
+                size += 2 + colNameBytes // colNameLen, colName
+                size += 8 + 1 + 8 + 8 + 8 // distinctCount, hasMinMax, minValue, maxValue, nullCount
+            }
         }
         return size
     }
@@ -249,6 +263,30 @@ class Catalog(
                 buf.put(colNameBytes)
 
                 buf.putInt(idx.rootPageId)
+            }
+
+            // 통계 섹션
+            buf.putInt(columnStatsMap.size)
+            for ((tableName, colStats) in columnStatsMap) {
+                val tblNameBytes = tableName.toByteArray(Charsets.UTF_8)
+                buf.putShort(tblNameBytes.size.toShort())
+                buf.put(tblNameBytes)
+
+                buf.putLong(rowCounts.getOrDefault(tableName, 0L))
+
+                buf.putShort(colStats.size.toShort())
+                for ((colName, stats) in colStats) {
+                    val colNameBytes = colName.toByteArray(Charsets.UTF_8)
+                    buf.putShort(colNameBytes.size.toShort())
+                    buf.put(colNameBytes)
+
+                    buf.putLong(stats.distinctCount)
+                    val hasMinMax = stats.minValue is Number && stats.maxValue is Number
+                    buf.put(if (hasMinMax) 1.toByte() else 0.toByte())
+                    buf.putLong(if (hasMinMax) (stats.minValue as Number).toLong() else 0L)
+                    buf.putLong(if (hasMinMax) (stats.maxValue as Number).toLong() else 0L)
+                    buf.putLong(stats.nullCount)
+                }
             }
         } finally {
             bpm.unpinPage(catalogPageId, isDirty = true)
@@ -317,6 +355,42 @@ class Catalog(
                     val rootPageId = buf.getInt()
 
                     indexes.add(IndexInfo(indexId, idxName, tblName, colName, rootPageId))
+                }
+            }
+
+            // 통계 섹션 (하위 호환: 이전 포맷에는 없을 수 있음)
+            rowCounts.clear()
+            columnStatsMap.clear()
+            if (buf.remaining() >= 4) {
+                val statsTableCount = buf.getInt()
+                repeat(statsTableCount) {
+                    val tblNameLen = buf.getShort().toInt() and 0xFFFF
+                    val tblNameBytes = ByteArray(tblNameLen)
+                    buf.get(tblNameBytes)
+                    val tblName = String(tblNameBytes, Charsets.UTF_8)
+
+                    val rowCount = buf.getLong()
+                    rowCounts[tblName] = rowCount
+
+                    val colStatsCount = buf.getShort().toInt() and 0xFFFF
+                    val colStats = mutableMapOf<String, ColumnStats>()
+                    repeat(colStatsCount) {
+                        val colNameLen = buf.getShort().toInt() and 0xFFFF
+                        val colNameBytes = ByteArray(colNameLen)
+                        buf.get(colNameBytes)
+                        val colName = String(colNameBytes, Charsets.UTF_8)
+
+                        val distinctCount = buf.getLong()
+                        val hasMinMax = buf.get() != 0.toByte()
+                        val minRaw = buf.getLong()
+                        val maxRaw = buf.getLong()
+                        val nullCount = buf.getLong()
+
+                        val minValue: Any? = if (hasMinMax) minRaw else null
+                        val maxValue: Any? = if (hasMinMax) maxRaw else null
+                        colStats[colName] = ColumnStats(distinctCount, minValue, maxValue, nullCount)
+                    }
+                    columnStatsMap[tblName] = colStats
                 }
             }
         } finally {
