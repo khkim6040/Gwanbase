@@ -40,7 +40,9 @@ Gwanbase/                      ← 프로젝트 루트 = Gradle 프로젝트 루
 │       │   ├── table/         ← Phase 2: Schema, Tuple, HeapFile, Catalog, Database
 │       │   ├── sql/           ← Phase 3: Lexer, Parser, Binder, SqlExecutor
 │       │   ├── execution/     ← Phase 4: Operator, Planner, ExpressionEvaluator
-│       │   └── wal/           ← Phase 5: LogRecord, LogManager, RecoveryManager
+│       │   ├── wal/           ← Phase 5: LogRecord, LogManager, RecoveryManager
+│       │   ├── txn/           ← Phase 6: LockManager, DatabaseSession
+│       │   └── optimizer/     ← Phase 7: PlanNode, Optimizer, CostEstimator, PlanEnumerator
 │       └── test/kotlin/gwanbase/
 │           ├── storage/
 │           ├── index/
@@ -48,7 +50,9 @@ Gwanbase/                      ← 프로젝트 루트 = Gradle 프로젝트 루
 │           ├── table/
 │           ├── sql/
 │           ├── execution/
-│           └── wal/
+│           ├── wal/
+│           ├── txn/
+│           └── optimizer/
 ├── bench/                     ← JMH 벤치마크 모듈
 │   └── build.gradle.kts
 └── docs/                      ← Phase별 스펙 문서, 아키텍처 문서
@@ -66,8 +70,8 @@ Phase 3  SQL Frontend                    ✅ 완료 (tag v0.3-sql)
 Phase 4  Query Execution Engine          ✅ 완료 (tag v0.4-execution)
 Phase 5  Crash Recovery (WAL)            ✅ 완료 (tag v0.5-wal)
 Phase 6  Concurrency Control             ✅ 완료 (tag v0.6-txn)
-Phase 7  Query Optimizer                 ⬜ 다음 작업
-Phase 8  Networking & Client Protocol    ⬜ 대기
+Phase 7  Query Optimizer                 ✅ 완료 (tag v0.7-optimizer)
+Phase 8  Networking & Client Protocol    ⬜ 다음 작업
 ```
 
 ### Phase 1 컴포넌트 (완료)
@@ -140,6 +144,24 @@ Phase 8  Networking & Client Protocol    ⬜ 대기
 |---|---|---|
 | LockManager | ✅ | `core/src/main/kotlin/gwanbase/txn/LockManager.kt` |
 | DatabaseSession | ✅ | `core/src/main/kotlin/gwanbase/txn/DatabaseSession.kt` |
+
+### Phase 7 컴포넌트 (완료)
+
+| 컴포넌트 | 상태 | 파일 |
+|---|---|---|
+| FromClause, ColumnRef.table | ✅ | `core/src/main/kotlin/gwanbase/sql/Ast.kt` |
+| Parser (JOIN, ANALYZE, EXPLAIN, CREATE/DROP INDEX) | ✅ | `core/src/main/kotlin/gwanbase/sql/Parser.kt` |
+| Binder (다중 테이블 스코프) | ✅ | `core/src/main/kotlin/gwanbase/sql/Binder.kt` |
+| KeySerializer | ✅ | `core/src/main/kotlin/gwanbase/index/KeySerializer.kt` |
+| IndexInfo, TableStats, ColumnStats | ✅ | `core/src/main/kotlin/gwanbase/table/Catalog.kt` |
+| IndexScanOperator | ✅ | `core/src/main/kotlin/gwanbase/execution/IndexScanOperator.kt` |
+| NestedLoopJoinOperator | ✅ | `core/src/main/kotlin/gwanbase/execution/NestedLoopJoinOperator.kt` |
+| PlanNode | ✅ | `core/src/main/kotlin/gwanbase/optimizer/PlanNode.kt` |
+| StatisticsManager | ✅ | `core/src/main/kotlin/gwanbase/optimizer/StatisticsManager.kt` |
+| CostEstimator | ✅ | `core/src/main/kotlin/gwanbase/optimizer/CostEstimator.kt` |
+| PlanEnumerator | ✅ | `core/src/main/kotlin/gwanbase/optimizer/PlanEnumerator.kt` |
+| Optimizer | ✅ | `core/src/main/kotlin/gwanbase/optimizer/Optimizer.kt` |
+| Planner (PlanNode→Operator 변환) | ✅ | `core/src/main/kotlin/gwanbase/execution/Planner.kt` |
 
 ## 빌드 및 테스트 명령어
 
@@ -303,9 +325,18 @@ ByteBufferExtensions ← length-prefixed 읽기/쓰기, newPageBuffer() 유틸�
 - Database는 세션 팩토리로 축소, ThreadLocal로 WalCallback 연동
 - UPDATE/DELETE는 변경 시점에만 X 잠금 (S→X 업그레이드 데드락 방지)
 
-### Phase 7 (다음 작업 — 대기)
+### Phase 7 (완료)
 
-Phase 7 시작 시점에 스펙을 작성하고 TDD로 진행한다.
+상세 설계·트레이드오프·테스트 시나리오는 `docs/specs/phase-7-query-optimizer.md`
+참조. 완료된 주요 결정 요약:
+
+- RBO + 간단한 통계 기반 최적화 (MVP → PostgreSQL CBO 고도화 예정)
+- AST → Optimizer → PlanNode → Planner → Operator 파이프라인
+- Secondary Index (B+Tree → RID), 단일 컬럼, 등가 조건만 MVP 지원
+- INNER JOIN + Nested Loop Join, greedy 조인 순서 선택
+- ANALYZE로 컬럼 통계 수집, INSERT/DELETE 시 행 수 자동 추적
+- EXPLAIN으로 실행 계획 텍스트 출력
+- 고도화 로드맵은 `docs/specs/phase-7-advanced.md` 참조
 
 ## 문서 관리
 
