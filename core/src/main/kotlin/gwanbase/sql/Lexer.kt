@@ -51,6 +51,11 @@ class Lexer(private val source: String) {
             "BEGIN" to TokenType.BEGIN,
             "COMMIT" to TokenType.COMMIT,
             "ROLLBACK" to TokenType.ROLLBACK,
+            "JOIN" to TokenType.JOIN,
+            "ON" to TokenType.ON,
+            "INDEX" to TokenType.INDEX,
+            "ANALYZE" to TokenType.ANALYZE,
+            "EXPLAIN" to TokenType.EXPLAIN,
         )
     }
 
@@ -182,6 +187,7 @@ class Lexer(private val source: String) {
             ')' -> Token(TokenType.RPAREN, ")", start)
             ',' -> Token(TokenType.COMMA, ",", start)
             ';' -> Token(TokenType.SEMICOLON, ";", start)
+            '.' -> Token(TokenType.DOT, ".", start)
             '=' -> Token(TokenType.EQ, "=", start)
             '!' -> {
                 if (pos < source.length && source[pos] == '=') {

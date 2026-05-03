@@ -181,6 +181,66 @@ class LexerTest {
     }
 
     @Test
+    fun `JOIN 키워드를 토큰화한다`() {
+        val tokens = Lexer("JOIN").tokenize()
+        tokens[0].type shouldBe TokenType.JOIN
+    }
+
+    @Test
+    fun `ON 키워드를 토큰화한다`() {
+        val tokens = Lexer("ON").tokenize()
+        tokens[0].type shouldBe TokenType.ON
+    }
+
+    @Test
+    fun `INDEX 키워드를 토큰화한다`() {
+        val tokens = Lexer("INDEX").tokenize()
+        tokens[0].type shouldBe TokenType.INDEX
+    }
+
+    @Test
+    fun `ANALYZE 키워드를 토큰화한다`() {
+        val tokens = Lexer("ANALYZE").tokenize()
+        tokens[0].type shouldBe TokenType.ANALYZE
+    }
+
+    @Test
+    fun `EXPLAIN 키워드를 토큰화한다`() {
+        val tokens = Lexer("EXPLAIN").tokenize()
+        tokens[0].type shouldBe TokenType.EXPLAIN
+    }
+
+    @Test
+    fun `DOT 구두점을 토큰화한다`() {
+        val tokens = Lexer("t.col").tokenize()
+        tokens shouldHaveSize 4
+        tokens[0].type shouldBe TokenType.IDENTIFIER
+        tokens[0].literal shouldBe "t"
+        tokens[1].type shouldBe TokenType.DOT
+        tokens[1].literal shouldBe "."
+        tokens[2].type shouldBe TokenType.IDENTIFIER
+        tokens[2].literal shouldBe "col"
+    }
+
+    @Test
+    fun `CREATE INDEX 문 토큰화`() {
+        val sql = "CREATE INDEX idx_age ON users (age)"
+        val tokens = Lexer(sql).tokenize()
+        val types = tokens.map { it.type }
+        types shouldBe listOf(
+            TokenType.CREATE,
+            TokenType.INDEX,
+            TokenType.IDENTIFIER,  // idx_age
+            TokenType.ON,
+            TokenType.IDENTIFIER,  // users
+            TokenType.LPAREN,
+            TokenType.IDENTIFIER,  // age
+            TokenType.RPAREN,
+            TokenType.EOF,
+        )
+    }
+
+    @Test
     fun `CREATE TABLE 문 토큰화`() {
         val sql = "CREATE TABLE users (id INT NOT NULL, name VARCHAR(100))"
         val tokens = Lexer(sql).tokenize()
