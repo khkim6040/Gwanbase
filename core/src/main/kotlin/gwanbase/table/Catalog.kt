@@ -15,6 +15,18 @@ data class TableInfo(
 )
 
 /**
+ * 컬럼 통계 정보.
+ *
+ * 쿼리 옵티마이저가 카디널리티 추정에 사용한다.
+ */
+data class ColumnStats(
+    val distinctCount: Long,
+    val minValue: Any?,
+    val maxValue: Any?,
+    val nullCount: Long,
+)
+
+/**
  * 인덱스 메타데이터.
  */
 data class IndexInfo(
@@ -54,6 +66,8 @@ class Catalog(
     private var nextTableId: Int = 1
     private val indexes = mutableListOf<IndexInfo>()
     private var nextIndexId: Int = 1
+    private val rowCounts = mutableMapOf<String, Long>()
+    private val columnStatsMap = mutableMapOf<String, MutableMap<String, ColumnStats>>()
 
     companion object {
         /** 새 Catalog를 생성한다. 전용 페이지를 할당하고 빈 상태로 초기화한다. */
@@ -125,6 +139,37 @@ class Catalog(
         if (removed) flush()
         return removed
     }
+
+    // --- 통계 관리 ---
+
+    /** 테이블의 행 수를 반환한다. */
+    fun getRowCount(tableName: String): Long = rowCounts.getOrDefault(tableName, 0L)
+
+    /** 테이블의 행 수를 1 증가시킨다. */
+    fun incrementRowCount(tableName: String) {
+        rowCounts[tableName] = getRowCount(tableName) + 1
+    }
+
+    /** 테이블의 행 수를 1 감소시킨다. 0 미만으로 내려가지 않는다. */
+    fun decrementRowCount(tableName: String) {
+        val current = getRowCount(tableName)
+        if (current > 0) {
+            rowCounts[tableName] = current - 1
+        }
+    }
+
+    /** 컬럼 통계를 갱신한다. */
+    fun updateColumnStats(tableName: String, columnName: String, stats: ColumnStats) {
+        columnStatsMap.getOrPut(tableName) { mutableMapOf() }[columnName] = stats
+    }
+
+    /** 특정 컬럼의 통계를 조회한다. */
+    fun getColumnStats(tableName: String, columnName: String): ColumnStats? =
+        columnStatsMap[tableName]?.get(columnName)
+
+    /** 테이블의 모든 컬럼 통계를 조회한다. */
+    fun getAllColumnStats(tableName: String): Map<String, ColumnStats> =
+        columnStatsMap[tableName]?.toMap() ?: emptyMap()
 
     // --- 직렬화/역직렬화 ---
 

@@ -157,4 +157,88 @@ class CatalogIndexTest {
             dm.close()
         }
     }
+
+    // --- TableStats / ColumnStats 테스트 ---
+
+    @Test
+    fun `행 수 초기값은 0`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.getRowCount("users") shouldBe 0L
+    }
+
+    @Test
+    fun `행 수 증가 후 조회`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.incrementRowCount("users")
+        catalog.incrementRowCount("users")
+        catalog.incrementRowCount("users")
+        catalog.getRowCount("users") shouldBe 3L
+    }
+
+    @Test
+    fun `행 수 감소 후 조회`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.incrementRowCount("users")
+        catalog.incrementRowCount("users")
+        catalog.decrementRowCount("users")
+        catalog.getRowCount("users") shouldBe 1L
+    }
+
+    @Test
+    fun `행 수가 0 미만으로 내려가지 않는다`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.decrementRowCount("users")
+        catalog.getRowCount("users") shouldBe 0L
+    }
+
+    @Test
+    fun `컬럼 통계 저장 및 조회`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+
+        val stats = ColumnStats(
+            distinctCount = 100,
+            minValue = 1,
+            maxValue = 999,
+            nullCount = 5,
+        )
+        catalog.updateColumnStats("users", "id", stats)
+
+        val retrieved = catalog.getColumnStats("users", "id")
+        retrieved.shouldNotBeNull()
+        retrieved.distinctCount shouldBe 100L
+        retrieved.nullCount shouldBe 5L
+    }
+
+    @Test
+    fun `존재하지 않는 컬럼 통계 조회 시 null`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.getColumnStats("users", "id").shouldBeNull()
+    }
+
+    @Test
+    fun `테이블별 전체 컬럼 통계 조회`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+
+        catalog.updateColumnStats("users", "id", ColumnStats(100, 1, 999, 0))
+        catalog.updateColumnStats("users", "name", ColumnStats(95, "a", "z", 2))
+
+        val allStats = catalog.getAllColumnStats("users")
+        allStats.size shouldBe 2
+        allStats["id"].shouldNotBeNull()
+        allStats["name"].shouldNotBeNull()
+    }
+
+    @Test
+    fun `컬럼 통계가 없는 테이블은 빈 맵`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.getAllColumnStats("users").size shouldBe 0
+    }
 }
