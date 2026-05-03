@@ -366,4 +366,69 @@ class ParserTest {
         val stmt = parse("BEGIN;")
         stmt shouldBe Statement.Begin
     }
+
+    // ── CREATE INDEX / DROP INDEX / ANALYZE / EXPLAIN ──
+
+    @Test
+    fun `CREATE INDEX 파싱`() {
+        val stmt = parse("CREATE INDEX idx_age ON users (age);")
+        stmt shouldBe Statement.CreateIndex("idx_age", "users", "age")
+    }
+
+    @Test
+    fun `CREATE INDEX 세미콜론 없이 파싱`() {
+        val stmt = parse("CREATE INDEX idx_name ON products (name)")
+        stmt shouldBe Statement.CreateIndex("idx_name", "products", "name")
+    }
+
+    @Test
+    fun `DROP INDEX 파싱`() {
+        val stmt = parse("DROP INDEX idx_age;")
+        stmt shouldBe Statement.DropIndex("idx_age")
+    }
+
+    @Test
+    fun `DROP INDEX 세미콜론 없이 파싱`() {
+        val stmt = parse("DROP INDEX idx_name")
+        stmt shouldBe Statement.DropIndex("idx_name")
+    }
+
+    @Test
+    fun `ANALYZE 파싱`() {
+        val stmt = parse("ANALYZE users;")
+        stmt shouldBe Statement.Analyze("users")
+    }
+
+    @Test
+    fun `ANALYZE 세미콜론 없이 파싱`() {
+        val stmt = parse("ANALYZE products")
+        stmt shouldBe Statement.Analyze("products")
+    }
+
+    @Test
+    fun `EXPLAIN SELECT 파싱`() {
+        val stmt = parse("EXPLAIN SELECT * FROM users;")
+        stmt.shouldBeInstanceOf<Statement.Explain>()
+        val inner = stmt.statement.shouldBeInstanceOf<Statement.Select>()
+        inner.from shouldBe FromClause.Table("users")
+    }
+
+    @Test
+    fun `EXPLAIN SELECT WHERE 파싱`() {
+        val stmt = parse("EXPLAIN SELECT name FROM users WHERE age > 18;")
+        stmt.shouldBeInstanceOf<Statement.Explain>()
+        val inner = stmt.statement.shouldBeInstanceOf<Statement.Select>()
+        inner.from shouldBe FromClause.Table("users")
+        inner.where.shouldBeInstanceOf<Expression.BinaryOp>()
+    }
+
+    @Test
+    fun `CREATE 뒤에 잘못된 토큰은 에러`() {
+        assertThrows<ParseException> { parse("CREATE SOMETHING") }
+    }
+
+    @Test
+    fun `DROP 뒤에 잘못된 토큰은 에러`() {
+        assertThrows<ParseException> { parse("DROP SOMETHING") }
+    }
 }

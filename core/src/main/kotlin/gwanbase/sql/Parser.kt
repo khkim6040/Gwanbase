@@ -34,12 +34,14 @@ class Parser(private val tokens: List<Token>) {
 
     private fun parseStatement(): Statement {
         return when (peek().type) {
-            TokenType.CREATE -> parseCreateTable()
-            TokenType.DROP -> parseDropTable()
+            TokenType.CREATE -> parseCreate()
+            TokenType.DROP -> parseDrop()
             TokenType.SELECT -> parseSelect()
             TokenType.INSERT -> parseInsert()
             TokenType.UPDATE -> parseUpdate()
             TokenType.DELETE -> parseDelete()
+            TokenType.ANALYZE -> parseAnalyze()
+            TokenType.EXPLAIN -> parseExplain()
             TokenType.BEGIN -> { advance(); Statement.Begin }
             TokenType.COMMIT -> { advance(); Statement.Commit }
             TokenType.ROLLBACK -> { advance(); Statement.Rollback }
@@ -47,15 +49,26 @@ class Parser(private val tokens: List<Token>) {
         }
     }
 
-    // ── CREATE TABLE ──
+    // ── CREATE (TABLE | INDEX) ──
 
     /**
-     * CREATE TABLE 문을 파싱한다.
-     *
-     * 문법: CREATE TABLE name (coldef, coldef, ...)
+     * CREATE 문을 파싱한다. TABLE 또는 INDEX로 분기한다.
      */
-    private fun parseCreateTable(): Statement.CreateTable {
+    private fun parseCreate(): Statement {
         expect(TokenType.CREATE, "CREATE 키워드가 필요하다")
+        return when (peek().type) {
+            TokenType.TABLE -> parseCreateTableBody()
+            TokenType.INDEX -> parseCreateIndex()
+            else -> throw ParseException("CREATE 뒤에 TABLE 또는 INDEX가 필요하다", peek().position)
+        }
+    }
+
+    /**
+     * CREATE TABLE 문의 본문을 파싱한다.
+     *
+     * 문법: TABLE name (coldef, coldef, ...)
+     */
+    private fun parseCreateTableBody(): Statement.CreateTable {
         expect(TokenType.TABLE, "TABLE 키워드가 필요하다")
         val tableName = expectIdentifier("테이블 이름이 필요하다")
 
@@ -128,18 +141,82 @@ class Parser(private val tokens: List<Token>) {
         }
     }
 
-    // ── DROP TABLE ──
+    /**
+     * CREATE INDEX 문을 파싱한다.
+     *
+     * 문법: INDEX indexName ON tableName (columnName)
+     */
+    private fun parseCreateIndex(): Statement.CreateIndex {
+        expect(TokenType.INDEX, "INDEX 키워드가 필요하다")
+        val indexName = expectIdentifier("인덱스 이름이 필요하다")
+        expect(TokenType.ON, "ON 키워드가 필요하다")
+        val tableName = expectIdentifier("테이블 이름이 필요하다")
+        expect(TokenType.LPAREN, "'(' 가 필요하다")
+        val columnName = expectIdentifier("컬럼 이름이 필요하다")
+        expect(TokenType.RPAREN, "')' 가 필요하다")
+        return Statement.CreateIndex(indexName, tableName, columnName)
+    }
+
+    // ── DROP (TABLE | INDEX) ──
 
     /**
-     * DROP TABLE 문을 파싱한다.
-     *
-     * 문법: DROP TABLE name
+     * DROP 문을 파싱한다. TABLE 또는 INDEX로 분기한다.
      */
-    private fun parseDropTable(): Statement.DropTable {
+    private fun parseDrop(): Statement {
         expect(TokenType.DROP, "DROP 키워드가 필요하다")
+        return when (peek().type) {
+            TokenType.TABLE -> parseDropTableBody()
+            TokenType.INDEX -> parseDropIndex()
+            else -> throw ParseException("DROP 뒤에 TABLE 또는 INDEX가 필요하다", peek().position)
+        }
+    }
+
+    /**
+     * DROP TABLE 문의 본문을 파싱한다.
+     *
+     * 문법: TABLE name
+     */
+    private fun parseDropTableBody(): Statement.DropTable {
         expect(TokenType.TABLE, "TABLE 키워드가 필요하다")
         val tableName = expectIdentifier("테이블 이름이 필요하다")
         return Statement.DropTable(tableName)
+    }
+
+    /**
+     * DROP INDEX 문을 파싱한다.
+     *
+     * 문법: INDEX indexName
+     */
+    private fun parseDropIndex(): Statement.DropIndex {
+        expect(TokenType.INDEX, "INDEX 키워드가 필요하다")
+        val indexName = expectIdentifier("인덱스 이름이 필요하다")
+        return Statement.DropIndex(indexName)
+    }
+
+    // ── ANALYZE ──
+
+    /**
+     * ANALYZE 문을 파싱한다.
+     *
+     * 문법: ANALYZE tableName
+     */
+    private fun parseAnalyze(): Statement.Analyze {
+        expect(TokenType.ANALYZE, "ANALYZE 키워드가 필요하다")
+        val tableName = expectIdentifier("테이블 이름이 필요하다")
+        return Statement.Analyze(tableName)
+    }
+
+    // ── EXPLAIN ──
+
+    /**
+     * EXPLAIN 문을 파싱한다. 내부 문을 감싸서 실행 계획을 표시한다.
+     *
+     * 문법: EXPLAIN statement
+     */
+    private fun parseExplain(): Statement.Explain {
+        expect(TokenType.EXPLAIN, "EXPLAIN 키워드가 필요하다")
+        val inner = parseStatement()
+        return Statement.Explain(inner)
     }
 
     // ── SELECT ──
