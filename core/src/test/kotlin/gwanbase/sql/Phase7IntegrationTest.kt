@@ -6,6 +6,7 @@ import gwanbase.optimizer.StatisticsManager
 import gwanbase.table.*
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
+import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.types.shouldBeInstanceOf
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -137,6 +138,56 @@ class Phase7IntegrationTest {
         result.shouldBeInstanceOf<ExecuteResult.Analyzed>()
         result.tableName shouldBe "users"
         result.rowCount shouldBe 3
+    }
+
+    @Test
+    fun `EXPLAIN SELECT → SeqScan 포함 계획 텍스트 반환`() {
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+
+        val result = database.executeSql("EXPLAIN SELECT * FROM users")
+        result.shouldBeInstanceOf<ExecuteResult.Explained>()
+        result.planText shouldContain "SeqScan"
+        result.planText shouldContain "Project"
+    }
+
+    @Test
+    fun `EXPLAIN SELECT with index → IndexScan 포함 계획 텍스트 반환`() {
+        for (i in 1..1100) {
+            database.executeSql("INSERT INTO users (id, name, age) VALUES ($i, 'user$i', ${20 + i % 50})")
+        }
+        database.executeSql("CREATE INDEX idx_users_id ON users (id)")
+        database.executeSql("ANALYZE users")
+
+        val result = database.executeSql("EXPLAIN SELECT * FROM users WHERE id = 500")
+        result.shouldBeInstanceOf<ExecuteResult.Explained>()
+        result.planText shouldContain "IndexScan"
+    }
+
+    @Test
+    fun `Optimizer 경유 SELECT 실행 — 기존 결과와 동일`() {
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
+
+        val result = database.executeSql("SELECT * FROM users WHERE age = 30")
+        result.shouldBeInstanceOf<ExecuteResult.Selected>()
+        result.rows.size shouldBe 1
+        result.rows[0][1] shouldBe "Alice"
+    }
+
+    @Test
+    fun `SELECT with WHERE + index → Optimizer 경로로 정확한 결과`() {
+        for (i in 1..1100) {
+            database.executeSql("INSERT INTO users (id, name, age) VALUES ($i, 'user$i', ${20 + i % 50})")
+        }
+        database.executeSql("CREATE INDEX idx_users_id ON users (id)")
+        database.executeSql("ANALYZE users")
+
+        val result = database.executeSql("SELECT * FROM users WHERE id = 777")
+        result.shouldBeInstanceOf<ExecuteResult.Selected>()
+        result.rows.size shouldBe 1
+        result.rows[0][0] shouldBe 777
+        result.rows[0][1] shouldBe "user777"
     }
 
     @Test

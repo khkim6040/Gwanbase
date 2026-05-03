@@ -2,6 +2,7 @@ package gwanbase.sql
 
 import gwanbase.execution.ExpressionEvaluator
 import gwanbase.execution.Planner
+import gwanbase.optimizer.Optimizer
 import gwanbase.optimizer.StatisticsManager
 import gwanbase.table.*
 import gwanbase.txn.DatabaseSession
@@ -108,7 +109,17 @@ class SqlExecutor(
                 val rowCount = statsManager.analyze(database, stmt.tableName)
                 ExecuteResult.Analyzed(stmt.tableName, rowCount)
             }
-            is Statement.Explain -> TODO("Task 17에서 구현")
+            is Statement.Explain -> {
+                val inner = stmt.statement
+                if (inner !is Statement.Select) {
+                    throw BindException("EXPLAIN은 SELECT 문만 지원한다")
+                }
+                val binder = Binder(database.getCatalog())
+                binder.bind(inner)
+                val optimizer = Optimizer(database.getCatalog())
+                val plan = optimizer.optimize(inner)
+                ExecuteResult.Explained(plan.explain())
+            }
         }
     }
 
@@ -158,12 +169,15 @@ class SqlExecutor(
     }
 
     /**
-     * SELECT 문을 Volcano 모델로 실행한다.
+     * SELECT 문을 Optimizer + Volcano 모델로 실행한다.
      *
-     * Planner가 생성한 연산자 트리를 구동하여 결과를 수집한다.
+     * Optimizer가 비용 기반으로 최적 계획을 선택하고,
+     * Planner가 계획을 연산자 트리로 변환하여 결과를 수집한다.
      */
     private fun executeSelect(stmt: Statement.Select): ExecuteResult.Selected {
-        val op = planner.planSelect(stmt)
+        val optimizer = Optimizer(database.getCatalog())
+        val plan = optimizer.optimize(stmt)
+        val op = planner.toOperator(plan)
 
         op.open()
         try {
