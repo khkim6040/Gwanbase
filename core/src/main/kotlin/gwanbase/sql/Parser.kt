@@ -179,7 +179,7 @@ class Parser(private val tokens: List<Token>) {
             null
         }
 
-        return Statement.Select(columns, tableName, where, orderBy, limit)
+        return Statement.Select(columns, FromClause.Table(tableName), where, orderBy, limit)
     }
 
     /**
@@ -375,7 +375,7 @@ class Parser(private val tokens: List<Token>) {
             }
             TokenType.IDENTIFIER -> {
                 advance()
-                Expression.ColumnRef(token.literal)
+                Expression.ColumnRef(null, token.literal)
             }
             else -> throw ParseException(
                 "표현식이 필요하다, 발견: '${token.literal}'",

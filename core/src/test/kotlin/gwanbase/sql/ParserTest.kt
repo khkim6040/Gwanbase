@@ -202,7 +202,7 @@ class ParserTest {
         stmt.shouldBeInstanceOf<Statement.Select>()
         stmt.columns.size shouldBe 1
         stmt.columns[0].shouldBeInstanceOf<SelectItem.Star>()
-        stmt.tableName shouldBe "users"
+        stmt.from shouldBe FromClause.Table("users")
         stmt.where shouldBe null
         stmt.orderBy shouldBe null
         stmt.limit shouldBe null
@@ -213,7 +213,7 @@ class ParserTest {
         val stmt = parse("SELECT name, age FROM users WHERE age >= 18;")
         stmt.shouldBeInstanceOf<Statement.Select>()
         stmt.columns.size shouldBe 2
-        stmt.tableName shouldBe "users"
+        stmt.from shouldBe FromClause.Table("users")
         stmt.where.shouldBeInstanceOf<Expression.BinaryOp>()
     }
 
@@ -235,7 +235,7 @@ class ParserTest {
     fun `SELECT 전체 절 결합`() {
         val stmt = parse("SELECT name FROM users WHERE age > 20 ORDER BY name ASC LIMIT 5;")
         stmt.shouldBeInstanceOf<Statement.Select>()
-        stmt.tableName shouldBe "users"
+        stmt.from shouldBe FromClause.Table("users")
         stmt.where.shouldBeInstanceOf<Expression.BinaryOp>()
         stmt.orderBy shouldBe OrderByClause("name", ascending = true)
         stmt.limit shouldBe 5

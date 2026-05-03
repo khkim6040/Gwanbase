@@ -27,6 +27,10 @@ class Binder(private val catalog: Catalog) {
             is Statement.Begin -> { /* 검증 불필요 */ }
             is Statement.Commit -> { /* 검증 불필요 */ }
             is Statement.Rollback -> { /* 검증 불필요 */ }
+            is Statement.CreateIndex -> { /* Phase 7에서 검증 */ }
+            is Statement.DropIndex -> { /* Phase 7에서 검증 */ }
+            is Statement.Analyze -> { /* Phase 7에서 검증 */ }
+            is Statement.Explain -> bind(statement.statement)
         }
         return statement
     }
@@ -86,7 +90,9 @@ class Binder(private val catalog: Catalog) {
     }
 
     private fun bindSelect(stmt: Statement.Select) {
-        val schema = requireTable(stmt.tableName)
+        val tableName = (stmt.from as? FromClause.Table)?.tableName
+            ?: throw BindException("JOIN은 아직 바인딩을 지원하지 않는다")
+        val schema = requireTable(tableName)
 
         // SELECT 목록 검증
         for (item in stmt.columns) {

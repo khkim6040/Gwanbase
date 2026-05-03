@@ -82,6 +82,10 @@ class SqlExecutor(
             is Statement.Begin -> error("BEGIN은 DatabaseSession에서 처리한다")
             is Statement.Commit -> error("COMMIT은 DatabaseSession에서 처리한다")
             is Statement.Rollback -> error("ROLLBACK은 DatabaseSession에서 처리한다")
+            is Statement.CreateIndex -> TODO("Phase 7에서 구현")
+            is Statement.DropIndex -> TODO("Phase 7에서 구현")
+            is Statement.Analyze -> TODO("Phase 7에서 구현")
+            is Statement.Explain -> TODO("Phase 7에서 구현")
         }
     }
 

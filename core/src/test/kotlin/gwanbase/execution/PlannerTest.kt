@@ -37,7 +37,7 @@ class PlannerTest {
     fun `SELECT STAR FROM t는 Project가 SeqScan을 감싼다`() {
         val stmt = Statement.Select(
             columns = listOf(SelectItem.Star),
-            tableName = "students",
+            from = FromClause.Table("students"),
             where = null,
             orderBy = null,
             limit = null,
@@ -52,9 +52,9 @@ class PlannerTest {
     fun `SELECT WHERE 절이 있으면 Filter 포함`() {
         val stmt = Statement.Select(
             columns = listOf(SelectItem.Star),
-            tableName = "students",
+            from = FromClause.Table("students"),
             where = Expression.BinaryOp(
-                Expression.ColumnRef("score"),
+                Expression.ColumnRef(null,"score"),
                 BinaryOperator.GTE,
                 Expression.IntLiteral(80),
             ),
@@ -69,7 +69,7 @@ class PlannerTest {
     fun `SELECT ORDER BY가 있으면 Sort 포함`() {
         val stmt = Statement.Select(
             columns = listOf(SelectItem.Star),
-            tableName = "students",
+            from = FromClause.Table("students"),
             where = null,
             orderBy = OrderByClause("score", ascending = true),
             limit = null,
@@ -82,7 +82,7 @@ class PlannerTest {
     fun `SELECT LIMIT가 있으면 Limit 포함`() {
         val stmt = Statement.Select(
             columns = listOf(SelectItem.Star),
-            tableName = "students",
+            from = FromClause.Table("students"),
             where = null,
             orderBy = null,
             limit = 5,
@@ -101,12 +101,12 @@ class PlannerTest {
 
         val stmt = Statement.Select(
             columns = listOf(
-                SelectItem.ExprItem(Expression.ColumnRef("name")),
-                SelectItem.ExprItem(Expression.ColumnRef("score")),
+                SelectItem.ExprItem(Expression.ColumnRef(null,"name")),
+                SelectItem.ExprItem(Expression.ColumnRef(null,"score")),
             ),
-            tableName = "students",
+            from = FromClause.Table("students"),
             where = Expression.BinaryOp(
-                Expression.ColumnRef("score"),
+                Expression.ColumnRef(null,"score"),
                 BinaryOperator.GTE,
                 Expression.IntLiteral(70),
             ),

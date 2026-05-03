@@ -30,7 +30,8 @@ class Planner(
      * SELECT 문을 연산자 트리로 변환한다.
      */
     fun planSelect(stmt: Statement.Select): Operator {
-        var op: Operator = SeqScanOperator(database, stmt.tableName, session)
+        val tableName = (stmt.from as FromClause.Table).tableName
+        var op: Operator = SeqScanOperator(database, tableName, session)
 
         // WHERE → Filter
         if (stmt.where != null) {
