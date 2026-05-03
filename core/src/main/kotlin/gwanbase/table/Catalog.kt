@@ -15,6 +15,17 @@ data class TableInfo(
 )
 
 /**
+ * 인덱스 메타데이터.
+ */
+data class IndexInfo(
+    val indexId: Int,
+    val name: String,
+    val tableName: String,
+    val columnName: String,
+    val rootPageId: Int,
+)
+
+/**
  * 테이블/인덱스 메타데이터를 전용 페이지에 영속 저장한다.
  *
  * Catalog 페이지 직렬화 포맷:
@@ -41,6 +52,8 @@ class Catalog(
 ) {
     private val tables = mutableListOf<TableInfo>()
     private var nextTableId: Int = 1
+    private val indexes = mutableListOf<IndexInfo>()
+    private var nextIndexId: Int = 1
 
     companion object {
         /** 새 Catalog를 생성한다. 전용 페이지를 할당하고 빈 상태로 초기화한다. */
@@ -88,9 +101,34 @@ class Catalog(
         return removed
     }
 
+    // --- 인덱스 관리 ---
+
+    /** 인덱스를 생성한다. */
+    fun createIndex(name: String, tableName: String, columnName: String, rootPageId: Int): IndexInfo {
+        require(indexes.none { it.name == name }) { "인덱스 '$name'이 이미 존재한다" }
+        val info = IndexInfo(nextIndexId++, name, tableName, columnName, rootPageId)
+        indexes.add(info)
+        flush()
+        return info
+    }
+
+    /** 이름으로 인덱스를 조회한다. */
+    fun getIndex(name: String): IndexInfo? = indexes.find { it.name == name }
+
+    /** 특정 테이블에 속한 인덱스 목록을 반환한다. */
+    fun getIndexesForTable(tableName: String): List<IndexInfo> =
+        indexes.filter { it.tableName == tableName }
+
+    /** 인덱스를 삭제한다. */
+    fun dropIndex(name: String): Boolean {
+        val removed = indexes.removeAll { it.name == name }
+        if (removed) flush()
+        return removed
+    }
+
     // --- 직렬화/역직렬화 ---
 
-    /** 현재 테이블 목록의 직렬화 예상 크기를 바이트 단위로 반환한다. */
+    /** 현재 테이블·인덱스 목록의 직렬화 예상 크기를 바이트 단위로 반환한다. */
     private fun estimateSerializedSize(): Int {
         var size = 4 + 4 // nextTableId + tableCount
         for (info in tables) {
@@ -100,6 +138,15 @@ class Catalog(
                 val colNameBytes = col.name.toByteArray(Charsets.UTF_8).size
                 size += 2 + colNameBytes + 1 + 2 + 1 // colNameLen, colName, dataType, maxLength, nullable
             }
+        }
+        // 인덱스 섹션
+        size += 4 + 4 // nextIndexId + indexCount
+        for (idx in indexes) {
+            val nameBytes = idx.name.toByteArray(Charsets.UTF_8).size
+            val tableNameBytes = idx.tableName.toByteArray(Charsets.UTF_8).size
+            val colNameBytes = idx.columnName.toByteArray(Charsets.UTF_8).size
+            size += 4 + 2 + nameBytes + 2 + tableNameBytes + 2 + colNameBytes + 4
+            // indexId, nameLen, name, tableNameLen, tableName, colNameLen, colName, rootPageId
         }
         return size
     }
@@ -136,6 +183,27 @@ class Catalog(
                     buf.putShort(col.maxLength.toShort())
                     buf.put(if (col.nullable) 1.toByte() else 0.toByte())
                 }
+            }
+
+            // 인덱스 섹션
+            buf.putInt(nextIndexId)
+            buf.putInt(indexes.size)
+            for (idx in indexes) {
+                buf.putInt(idx.indexId)
+
+                val nameBytes = idx.name.toByteArray(Charsets.UTF_8)
+                buf.putShort(nameBytes.size.toShort())
+                buf.put(nameBytes)
+
+                val tableNameBytes = idx.tableName.toByteArray(Charsets.UTF_8)
+                buf.putShort(tableNameBytes.size.toShort())
+                buf.put(tableNameBytes)
+
+                val colNameBytes = idx.columnName.toByteArray(Charsets.UTF_8)
+                buf.putShort(colNameBytes.size.toShort())
+                buf.put(colNameBytes)
+
+                buf.putInt(idx.rootPageId)
             }
         } finally {
             bpm.unpinPage(catalogPageId, isDirty = true)
@@ -176,6 +244,35 @@ class Catalog(
                 }
 
                 tables.add(TableInfo(tableId, name, Schema(columns), heapFileFirstPageId))
+            }
+
+            // 인덱스 섹션 (하위 호환: 이전 포맷에는 없을 수 있음)
+            indexes.clear()
+            if (buf.remaining() >= 8) {
+                nextIndexId = buf.getInt()
+                val indexCount = buf.getInt()
+                repeat(indexCount) {
+                    val indexId = buf.getInt()
+
+                    val nameLen = buf.getShort().toInt() and 0xFFFF
+                    val nameBytes = ByteArray(nameLen)
+                    buf.get(nameBytes)
+                    val idxName = String(nameBytes, Charsets.UTF_8)
+
+                    val tableNameLen = buf.getShort().toInt() and 0xFFFF
+                    val tableNameBytes = ByteArray(tableNameLen)
+                    buf.get(tableNameBytes)
+                    val tblName = String(tableNameBytes, Charsets.UTF_8)
+
+                    val colNameLen = buf.getShort().toInt() and 0xFFFF
+                    val colNameBytes = ByteArray(colNameLen)
+                    buf.get(colNameBytes)
+                    val colName = String(colNameBytes, Charsets.UTF_8)
+
+                    val rootPageId = buf.getInt()
+
+                    indexes.add(IndexInfo(indexId, idxName, tblName, colName, rootPageId))
+                }
             }
         } finally {
             bpm.unpinPage(catalogPageId, isDirty = false)
