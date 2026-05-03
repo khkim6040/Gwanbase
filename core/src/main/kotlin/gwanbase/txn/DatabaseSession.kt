@@ -122,6 +122,13 @@ class DatabaseSession(
         return database.updateTuple(tableName, rid, tuple)
     }
 
+    /** S 잠금을 획득한다. IndexScanOperator 등에서 개별 행에 잠금을 걸 때 사용한다. */
+    internal fun acquireSharedLock(tableName: String, rid: RID) {
+        currentTxn?.let { txn ->
+            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.SHARED)
+        }
+    }
+
     /** X 잠금만 획득하고 실제 업데이트는 하지 않는다. 잠금 후 재조회를 위해 사용한다. */
     internal fun acquireExclusiveLock(tableName: String, rid: RID) {
         currentTxn?.let { txn ->
