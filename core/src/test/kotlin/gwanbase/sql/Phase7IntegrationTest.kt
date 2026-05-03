@@ -2,6 +2,7 @@ package gwanbase.sql
 
 import gwanbase.index.BPlusTree
 import gwanbase.index.KeySerializer
+import gwanbase.optimizer.StatisticsManager
 import gwanbase.table.*
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
@@ -124,5 +125,52 @@ class Phase7IntegrationTest {
         database.executeSql("DELETE FROM users WHERE id = 1")
 
         database.getCatalog().getRowCount("users") shouldBe 1
+    }
+
+    @Test
+    fun `ANALYZE 실행 후 rowCount 반환`() {
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', 35)")
+
+        val result = database.executeSql("ANALYZE users")
+        result.shouldBeInstanceOf<ExecuteResult.Analyzed>()
+        result.tableName shouldBe "users"
+        result.rowCount shouldBe 3
+    }
+
+    @Test
+    fun `ANALYZE 후 컬럼 통계 정확성`() {
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)")
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)")
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (3, 'Charlie', NULL)")
+
+        database.executeSql("ANALYZE users")
+
+        val catalog = database.getCatalog()
+
+        // id 컬럼: 3개 고유값, min=1, max=3, null=0
+        val idStats = catalog.getColumnStats("users", "id")
+        idStats shouldNotBe null
+        idStats!!.distinctCount shouldBe 3
+        idStats.minValue shouldBe 1L
+        idStats.maxValue shouldBe 3L
+        idStats.nullCount shouldBe 0
+
+        // name 컬럼: 3개 고유값, 문자열이므로 min/max=null, null=0
+        val nameStats = catalog.getColumnStats("users", "name")
+        nameStats shouldNotBe null
+        nameStats!!.distinctCount shouldBe 3
+        nameStats.minValue shouldBe null
+        nameStats.maxValue shouldBe null
+        nameStats.nullCount shouldBe 0
+
+        // age 컬럼: 2개 고유값, min=25, max=30, null=1
+        val ageStats = catalog.getColumnStats("users", "age")
+        ageStats shouldNotBe null
+        ageStats!!.distinctCount shouldBe 2
+        ageStats.minValue shouldBe 25L
+        ageStats.maxValue shouldBe 30L
+        ageStats.nullCount shouldBe 1
     }
 }

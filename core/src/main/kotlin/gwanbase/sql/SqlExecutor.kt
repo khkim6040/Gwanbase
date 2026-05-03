@@ -2,6 +2,7 @@ package gwanbase.sql
 
 import gwanbase.execution.ExpressionEvaluator
 import gwanbase.execution.Planner
+import gwanbase.optimizer.StatisticsManager
 import gwanbase.table.*
 import gwanbase.txn.DatabaseSession
 
@@ -102,7 +103,11 @@ class SqlExecutor(
                 database.dropIndex(stmt.indexName)
                 ExecuteResult.IndexDropped(stmt.indexName)
             }
-            is Statement.Analyze -> TODO("Task 13에서 구현")
+            is Statement.Analyze -> {
+                val statsManager = StatisticsManager(database.getCatalog())
+                val rowCount = statsManager.analyze(database, stmt.tableName)
+                ExecuteResult.Analyzed(stmt.tableName, rowCount)
+            }
             is Statement.Explain -> TODO("Task 17에서 구현")
         }
     }
