@@ -54,7 +54,7 @@ class FilterOperatorTest {
         insertStudent(3, "Charlie", 85)
 
         val predicate = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.GTE,
             Expression.IntLiteral(80),
         )
@@ -71,7 +71,7 @@ class FilterOperatorTest {
         insertStudent(2, "Bob", 40)
 
         val predicate = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.GTE,
             Expression.IntLiteral(100),
         )
@@ -86,7 +86,7 @@ class FilterOperatorTest {
         insertStudent(2, "Bob", 80)
 
         val predicate = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.GTE,
             Expression.IntLiteral(50),
         )
@@ -100,7 +100,7 @@ class FilterOperatorTest {
         insertStudent(1, "Alice", 90)
         insertStudent(2, null, 80)
 
-        val predicate = Expression.IsNull(Expression.ColumnRef("name"))
+        val predicate = Expression.IsNull(Expression.ColumnRef(null,"name"))
         val filter = FilterOperator(SeqScanOperator(database, "students"), predicate)
 
         val results = collectAll(filter)
@@ -113,7 +113,7 @@ class FilterOperatorTest {
         insertStudent(1, "Alice", 90)
         insertStudent(2, null, 80)
 
-        val predicate = Expression.IsNotNull(Expression.ColumnRef("name"))
+        val predicate = Expression.IsNotNull(Expression.ColumnRef(null,"name"))
         val filter = FilterOperator(SeqScanOperator(database, "students"), predicate)
 
         val results = collectAll(filter)
@@ -129,13 +129,13 @@ class FilterOperatorTest {
 
         val predicate = Expression.BinaryOp(
             Expression.BinaryOp(
-                Expression.ColumnRef("score"),
+                Expression.ColumnRef(null,"score"),
                 BinaryOperator.GTE,
                 Expression.IntLiteral(80),
             ),
             BinaryOperator.AND,
             Expression.BinaryOp(
-                Expression.ColumnRef("name"),
+                Expression.ColumnRef(null,"name"),
                 BinaryOperator.NEQ,
                 Expression.StringLiteral("Alice"),
             ),
@@ -163,7 +163,7 @@ class FilterOperatorTest {
 
         // score = 90 → NULL score는 NULL = 90 → NULL → false → 탈락
         val predicate = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.EQ,
             Expression.IntLiteral(90),
         )

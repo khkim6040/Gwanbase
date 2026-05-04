@@ -118,20 +118,21 @@ class HeapFile(
      */
     fun updateTuple(rid: RID, data: ByteArray): RID {
         val page = bpm.fetchPage(rid.pageId) ?: error("페이지 ${rid.pageId} 조회 실패")
-        try {
+        // 쓰기 래치로 delete+reinsert를 원자적으로 수행하여 슬롯 경쟁을 방지한다.
+        val newSlotId = page.writeLatch {
             val heapPage = HeapPage(page.data)
             heapPage.deleteRecord(rid.slotId)
             page.isDirty = true
-            // 같은 페이지에 재삽입 시도
             val slotId = heapPage.insertRecord(data)
-            if (slotId >= 0) {
-                return RID(rid.pageId, slotId)
-            }
-            addToFreeListIfNeeded(rid.pageId, heapPage)
-        } finally {
-            bpm.unpinPage(rid.pageId, isDirty = page.isDirty)
+            if (slotId < 0) addToFreeListIfNeeded(rid.pageId, heapPage)
+            slotId
         }
-        return insertTuple(data)
+        bpm.unpinPage(rid.pageId, isDirty = page.isDirty)
+        return if (newSlotId >= 0) {
+            RID(rid.pageId, newSlotId)
+        } else {
+            insertTuple(data)
+        }
     }
 
     /** 전체 튜플을 순회하는 iterator를 반환한다. */

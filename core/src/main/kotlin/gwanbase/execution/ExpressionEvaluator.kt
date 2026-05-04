@@ -22,7 +22,7 @@ object ExpressionEvaluator {
             is Expression.BoolLiteral -> expr.value
             is Expression.NullLiteral -> null
             is Expression.ColumnRef -> {
-                val index = schema.columnIndex(expr.name)
+                val index = resolveColumnIndex(schema, expr)
                 getTupleValue(tuple, index, schema.column(index).type)
             }
             is Expression.BinaryOp -> {
@@ -81,6 +81,25 @@ object ExpressionEvaluator {
             DataType.TIMESTAMP -> tuple.getTimestamp(index)
             DataType.VARCHAR -> tuple.getString(index)
         }
+    }
+
+    /**
+     * ColumnRef의 테이블 한정자를 고려하여 스키마에서 컬럼 인덱스를 찾는다.
+     *
+     * JOIN 결합 스키마에서는 동일 이름의 컬럼이 "테이블명.컬럼명" 형식으로 저장되므로,
+     * 테이블 한정자가 있으면 "table.name" 형식을 먼저 시도하고,
+     * 없으면 기존 방식(이름만)으로 조회한다.
+     */
+    fun resolveColumnIndex(schema: Schema, ref: Expression.ColumnRef): Int {
+        if (ref.table != null) {
+            // 테이블 한정 참조: "table.name" 형식으로 먼저 시도
+            val qualifiedName = "${ref.table}.${ref.name}"
+            val qualifiedIdx = schema.columnIndexOrNull(qualifiedName)
+            if (qualifiedIdx != null) return qualifiedIdx
+            // fallback: 비한정 이름으로 시도 (단일 테이블 등)
+            return schema.columnIndex(ref.name)
+        }
+        return schema.columnIndex(ref.name)
     }
 
     // ── private ──

@@ -1,9 +1,20 @@
 package gwanbase.table
 
+import gwanbase.execution.ExpressionEvaluator
+import gwanbase.index.BPlusTree
+import gwanbase.index.KeySerializer
+import gwanbase.sql.ExecuteResult
 import gwanbase.storage.BufferPoolManager
 import gwanbase.storage.DiskManager
+import gwanbase.txn.DatabaseSession
+import gwanbase.txn.LockManager
+import gwanbase.wal.LogManager
+import gwanbase.wal.RecoveryManager
+import gwanbase.wal.TransactionContext
+import gwanbase.wal.WalCallbackImpl
 import java.nio.ByteOrder
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Phase 2 데이터베이스 진입점.
@@ -19,16 +30,20 @@ import java.nio.file.Path
  */
 class Database private constructor(
     private val diskManager: DiskManager,
-    private val bpm: BufferPoolManager,
+    internal val bpm: BufferPoolManager,
     private val catalog: Catalog,
+    internal val logManager: LogManager?,
 ) : AutoCloseable {
 
     private var closed = false
+    internal val nextTxnId = AtomicInteger(0)
+    internal val lockManager = LockManager()
+    internal val currentTxnHolder = ThreadLocal<TransactionContext?>()
 
     companion object {
         const val METADATA_PAGE_ID = 0
         const val MAGIC = 0x47574E42  // "GWNB"
-        const val VERSION: Short = 2  // Phase 2
+        const val VERSION: Short = 3  // Phase 5: WAL 도입
 
         private const val OFFSET_MAGIC = 0
         private const val OFFSET_VERSION = 4
@@ -48,7 +63,27 @@ class Database private constructor(
                     loadExisting(bpm)
                 }
 
-                return Database(dm, bpm, catalog)
+                val logPath = path.resolveSibling(path.fileName.toString() + ".wal")
+                val logManager = LogManager(logPath)
+
+                // Recovery 수행 (WAL 콜백 연결 전 — recovery 중 추가 로깅 방지)
+                val recoveryManager = RecoveryManager(logManager, bpm)
+                val nextTxnId = recoveryManager.recover()
+
+                // Catalog 재로드 (recovery가 catalog 페이지를 변경했을 수 있음)
+                val recoveredCatalog = if (dm.pageCount > 0) {
+                    loadExisting(bpm)
+                } else {
+                    catalog
+                }
+
+                val db = Database(dm, bpm, recoveredCatalog, logManager)
+                db.nextTxnId.set(nextTxnId)
+
+                // WAL 콜백 연결 (recovery 완료 후)
+                bpm.walCallback = WalCallbackImpl(logManager) { db.currentTxnHolder.get() }
+
+                return db
             } catch (e: Throwable) {
                 dm.close()
                 throw e
@@ -80,7 +115,7 @@ class Database private constructor(
                     "DB 파일 식별자 불일치: expected ${MAGIC.toString(16)}, got ${magic.toString(16)}"
                 }
                 val version = buf.getShort(OFFSET_VERSION)
-                check(version == VERSION) {
+                check(version == VERSION || version == 2.toShort()) {
                     "DB 파일 버전 불일치: expected $VERSION, got $version"
                 }
                 catalogPageId = buf.getInt(OFFSET_CATALOG_PAGE_ID)
@@ -123,7 +158,10 @@ class Database private constructor(
         val info = catalog.getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
         val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
-        return heapFile.insertTuple(tuple.serialize())
+        val rid = heapFile.insertTuple(tuple.serialize())
+        maintainIndexesOnInsert(tableName, info.schema, tuple, rid)
+        catalog.incrementRowCount(tableName)
+        return rid
     }
 
     /** RID로 튜플을 조회한다. */
@@ -141,8 +179,15 @@ class Database private constructor(
         checkOpen()
         val info = catalog.getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
+        // 삭제 전에 튜플을 읽어 인덱스 정리에 사용한다
+        val tuple = getTuple(tableName, rid)
         val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
-        return heapFile.deleteTuple(rid)
+        val deleted = heapFile.deleteTuple(rid)
+        if (deleted && tuple != null) {
+            maintainIndexesOnDelete(tableName, info.schema, tuple, rid)
+            catalog.decrementRowCount(tableName)
+        }
+        return deleted
     }
 
     /** 테이블의 모든 튜플을 순회하는 iterator를 반환한다. */
@@ -161,19 +206,64 @@ class Database private constructor(
         }
     }
 
+    // ── 인덱스 관리 ──
+
+    /** 인덱스 메타데이터로 B+Tree를 반환한다. */
+    fun getIndexTree(indexInfo: IndexInfo): BPlusTree {
+        checkOpen()
+        return BPlusTree(bpm, indexInfo.rootPageId)
+    }
+
+    /**
+     * 인덱스를 생성한다.
+     *
+     * 기존 테이블 데이터를 스캔하여 B+Tree를 구축한 뒤 Catalog에 등록한다.
+     */
+    fun createIndex(indexName: String, tableName: String, columnName: String) {
+        checkOpen()
+        val tableInfo = getTable(tableName)
+            ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
+        val schema = tableInfo.schema
+        val colIndex = schema.columnIndex(columnName)
+        val colType = schema.column(colIndex).type
+        val tree = BPlusTree.createNew(bpm)
+        val iter = scanTable(tableName)
+        while (iter.hasNext()) {
+            val (rid, tuple) = iter.next()
+            val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
+            val columnKey = KeySerializer.serializeKey(value, colType)
+            tree.insert(KeySerializer.compositeKey(columnKey, rid), KeySerializer.serializeRid(rid))
+        }
+        catalog.createIndex(indexName, tableName, columnName, tree.rootPageId)
+    }
+
+    /** 인덱스를 삭제한다. */
+    fun dropIndex(indexName: String) {
+        checkOpen()
+        catalog.dropIndex(indexName)
+    }
+
     /** 테이블을 삭제한다. 존재하지 않으면 false를 반환한다. */
     fun dropTable(name: String): Boolean {
         checkOpen()
         return catalog.dropTable(name)
     }
 
-    /** 튜플을 업데이트한다. 내부적으로 삭제 후 재삽입한다. */
+    /** 튜플을 업데이트한다. 내부적으로 삭제 후 재삽입하며 인덱스를 유지보수한다. */
     fun updateTuple(tableName: String, rid: RID, tuple: Tuple): RID {
         checkOpen()
         val info = catalog.getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
+        // 이전 튜플을 읽어 인덱스 정리에 사용한다
+        val oldTuple = getTuple(tableName, rid)
         val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
-        return heapFile.updateTuple(rid, tuple.serialize())
+        val newRid = heapFile.updateTuple(rid, tuple.serialize())
+        // 인덱스 유지보수: 이전 키 제거 후 새 키 삽입
+        if (oldTuple != null) {
+            maintainIndexesOnDelete(tableName, info.schema, oldTuple, rid)
+        }
+        maintainIndexesOnInsert(tableName, info.schema, tuple, newRid)
+        return newRid
     }
 
     /** Catalog 인스턴스를 반환한다. Binder에서 스키마 검증용으로 사용한다. */
@@ -182,11 +272,73 @@ class Database private constructor(
         return catalog
     }
 
+    /**
+     * 새 데이터베이스 세션을 생성한다.
+     */
+    fun createSession(): DatabaseSession {
+        checkOpen()
+        return DatabaseSession(this, lockManager)
+    }
+
+    /** 트랜잭션 ID를 할당한다. */
+    internal fun allocateTxnId(): Int = nextTxnId.getAndIncrement()
+
+    /**
+     * SQL 문을 auto-commit 트랜잭션으로 실행한다.
+     *
+     * 내부적으로 임시 세션을 생성하여 실행하므로 기존 호출자는 변경 없이 사용 가능하다.
+     */
+    fun executeSql(sql: String): ExecuteResult {
+        return createSession().use { session ->
+            session.executeSql(sql)
+        }
+    }
+
+    /** 테스트 전용: checkpoint 없이 리소스를 닫는다. crash 시뮬레이션에 사용. */
+    internal fun closeWithoutCheckpoint() {
+        if (closed) return
+        // checkpoint 없이, dirty page flush 없이 닫는다
+        logManager?.close()
+        diskManager.close()
+        closed = true
+    }
+
     override fun close() {
         if (closed) return
         bpm.flushAllPages()
+        logManager?.let { lm ->
+            lm.appendCheckpoint()
+            lm.flush(lm.recordCount() - 1)
+        }
+        logManager?.close()
         diskManager.close()
         closed = true
+    }
+
+    // ── 인덱스 유지보수 ──
+
+    /** INSERT 시 모든 관련 인덱스에 엔트리를 추가한다. */
+    private fun maintainIndexesOnInsert(tableName: String, schema: Schema, tuple: Tuple, rid: RID) {
+        for (indexInfo in catalog.getIndexesForTable(tableName)) {
+            val colIndex = schema.columnIndex(indexInfo.columnName)
+            val colType = schema.column(colIndex).type
+            val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
+            val tree = BPlusTree(bpm, indexInfo.rootPageId)
+            val columnKey = KeySerializer.serializeKey(value, colType)
+            tree.insert(KeySerializer.compositeKey(columnKey, rid), KeySerializer.serializeRid(rid))
+        }
+    }
+
+    /** DELETE 시 모든 관련 인덱스에서 엔트리를 제거한다. */
+    private fun maintainIndexesOnDelete(tableName: String, schema: Schema, tuple: Tuple, rid: RID) {
+        for (indexInfo in catalog.getIndexesForTable(tableName)) {
+            val colIndex = schema.columnIndex(indexInfo.columnName)
+            val colType = schema.column(colIndex).type
+            val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
+            val tree = BPlusTree(bpm, indexInfo.rootPageId)
+            val columnKey = KeySerializer.serializeKey(value, colType)
+            tree.delete(KeySerializer.compositeKey(columnKey, rid))
+        }
     }
 
     private fun checkOpen() {

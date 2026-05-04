@@ -25,6 +25,11 @@ class Schema(val columns: List<Column>) {
     fun columnIndex(name: String): Int =
         requireNotNull(nameToIndex[name]) { "컬럼 '$name'이 스키마에 존재하지 않는다" }
 
+    /**
+     * 컬럼 이름으로 인덱스를 조회한다. 존재하지 않으면 null을 반환한다.
+     */
+    fun columnIndexOrNull(name: String): Int? = nameToIndex[name]
+
     /** 인덱스로 컬럼을 조회한다. */
     fun column(index: Int): Column = columns[index]
 }

@@ -9,6 +9,8 @@ enum class TokenType {
     CREATE, DROP, TABLE, ORDER, BY, ASC, DESC, LIMIT,
     AND, OR, NOT, NULL, TRUE, FALSE,
     IS,
+    BEGIN, COMMIT, ROLLBACK,
+    JOIN, ON, INDEX, ANALYZE, EXPLAIN,
     INT, INTEGER, BIGINT, BOOLEAN, DOUBLE, FLOAT, VARCHAR, TIMESTAMP,
 
     // 리터럴
@@ -22,7 +24,7 @@ enum class TokenType {
     EQ, NEQ, LT, GT, LTE, GTE,
 
     // 구두점
-    LPAREN, RPAREN, COMMA, SEMICOLON,
+    LPAREN, RPAREN, COMMA, SEMICOLON, DOT,
 
     // 특수
     EOF,

@@ -24,6 +24,13 @@ class Binder(private val catalog: Catalog) {
             is Statement.Select -> bindSelect(statement)
             is Statement.Update -> bindUpdate(statement)
             is Statement.Delete -> bindDelete(statement)
+            is Statement.Begin -> { /* 검증 불필요 */ }
+            is Statement.Commit -> { /* 검증 불필요 */ }
+            is Statement.Rollback -> { /* 검증 불필요 */ }
+            is Statement.CreateIndex -> bindCreateIndex(statement)
+            is Statement.DropIndex -> { /* 런타임 검증 */ }
+            is Statement.Analyze -> bindAnalyze(statement)
+            is Statement.Explain -> bind(statement.statement)
         }
         return statement
     }
@@ -83,24 +90,29 @@ class Binder(private val catalog: Catalog) {
     }
 
     private fun bindSelect(stmt: Statement.Select) {
-        val schema = requireTable(stmt.tableName)
+        val tableScopes = collectTableScopes(stmt.from)
 
-        // SELECT 목록 검증
-        for (item in stmt.columns) {
-            when (item) {
-                is SelectItem.Star -> { /* 모든 컬럼 — 검증 불필요 */ }
-                is SelectItem.ExprItem -> validateExpression(schema, item.expr)
+        if (tableScopes.size == 1) {
+            // 기존 단일 테이블 로직 유지 (하위 호환)
+            val schema = tableScopes.values.first()
+            for (item in stmt.columns) {
+                when (item) {
+                    is SelectItem.Star -> { /* 모든 컬럼 — 검증 불필요 */ }
+                    is SelectItem.ExprItem -> validateExpression(schema, item.expr)
+                }
             }
-        }
-
-        // WHERE 절 검증
-        if (stmt.where != null) {
-            validateExpression(schema, stmt.where)
-        }
-
-        // ORDER BY 절 검증
-        if (stmt.orderBy != null) {
-            requireColumn(schema, stmt.orderBy.column)
+            if (stmt.where != null) validateExpression(schema, stmt.where)
+            if (stmt.orderBy != null) requireColumn(schema, stmt.orderBy.column)
+        } else {
+            // 다중 테이블
+            for (item in stmt.columns) {
+                when (item) {
+                    is SelectItem.Star -> { /* 모든 컬럼 — 검증 불필요 */ }
+                    is SelectItem.ExprItem -> validateMultiTableExpression(tableScopes, item.expr)
+                }
+            }
+            if (stmt.where != null) validateMultiTableExpression(tableScopes, stmt.where)
+            validateJoinConditions(stmt.from, tableScopes)
         }
     }
 
@@ -182,5 +194,109 @@ class Binder(private val catalog: Catalog) {
             is Expression.BoolLiteral,
             is Expression.NullLiteral -> { /* 리터럴 — 검증 불필요 */ }
         }
+    }
+
+    /**
+     * FROM 절에서 테이블 스코프를 재귀적으로 수집한다.
+     *
+     * 별칭이 있으면 별칭을, 없으면 테이블 이름을 키로 사용한다.
+     *
+     * @return 별칭/테이블명 → 스키마 맵
+     * @throws BindException 테이블이 존재하지 않을 때
+     */
+    private fun collectTableScopes(from: FromClause): Map<String, Schema> {
+        val result = mutableMapOf<String, Schema>()
+        collectTableScopesRecursive(from, result)
+        return result
+    }
+
+    private fun collectTableScopesRecursive(from: FromClause, result: MutableMap<String, Schema>) {
+        when (from) {
+            is FromClause.Table -> {
+                val schema = requireTable(from.tableName)
+                val key = from.alias ?: from.tableName
+                result[key] = schema
+            }
+            is FromClause.Join -> {
+                collectTableScopesRecursive(from.left, result)
+                collectTableScopesRecursive(from.right, result)
+            }
+        }
+    }
+
+    /**
+     * 다중 테이블 환경에서 표현식 내의 컬럼 참조를 검증한다.
+     *
+     * 테이블 한정자가 있으면 해당 스코프에서 검증하고,
+     * 없으면 모든 스코프에서 검색하여 모호한 경우 에러를 발생시킨다.
+     *
+     * @throws BindException 컬럼을 찾을 수 없거나 모호한 경우
+     */
+    private fun validateMultiTableExpression(scopes: Map<String, Schema>, expr: Expression) {
+        when (expr) {
+            is Expression.ColumnRef -> {
+                if (expr.table != null) {
+                    // 테이블 한정 컬럼: 해당 스코프에서 검증
+                    val schema = scopes[expr.table]
+                        ?: throw BindException("테이블 별칭 '${expr.table}'이 FROM 절에 존재하지 않는다")
+                    requireColumn(schema, expr.name)
+                } else {
+                    // 비한정 컬럼: 모든 스코프에서 검색
+                    val found = scopes.entries.filter { (_, schema) ->
+                        try {
+                            schema.columnIndex(expr.name)
+                            true
+                        } catch (e: IllegalArgumentException) {
+                            false
+                        }
+                    }
+                    when {
+                        found.isEmpty() -> throw BindException("컬럼 '${expr.name}'이 스키마에 존재하지 않는다")
+                        found.size > 1 -> throw BindException("컬럼 '${expr.name}'이 모호하다 — 테이블을 한정해야 한다")
+                    }
+                }
+            }
+            is Expression.BinaryOp -> {
+                validateMultiTableExpression(scopes, expr.left)
+                validateMultiTableExpression(scopes, expr.right)
+            }
+            is Expression.UnaryOp -> validateMultiTableExpression(scopes, expr.operand)
+            is Expression.IsNull -> validateMultiTableExpression(scopes, expr.expr)
+            is Expression.IsNotNull -> validateMultiTableExpression(scopes, expr.expr)
+            is Expression.IntLiteral,
+            is Expression.FloatLiteral,
+            is Expression.StringLiteral,
+            is Expression.BoolLiteral,
+            is Expression.NullLiteral -> { /* 리터럴 — 검증 불필요 */ }
+        }
+    }
+
+    /**
+     * JOIN 절의 ON 조건을 검증한다.
+     */
+    private fun validateJoinConditions(from: FromClause, scopes: Map<String, Schema>) {
+        when (from) {
+            is FromClause.Table -> { /* 단일 테이블 — ON 조건 없음 */ }
+            is FromClause.Join -> {
+                validateMultiTableExpression(scopes, from.condition)
+                validateJoinConditions(from.left, scopes)
+                validateJoinConditions(from.right, scopes)
+            }
+        }
+    }
+
+    /**
+     * CREATE INDEX 문을 바인딩한다. 테이블과 컬럼 존재를 검증한다.
+     */
+    private fun bindCreateIndex(stmt: Statement.CreateIndex) {
+        val schema = requireTable(stmt.tableName)
+        requireColumn(schema, stmt.columnName)
+    }
+
+    /**
+     * ANALYZE 문을 바인딩한다. 테이블 존재를 검증한다.
+     */
+    private fun bindAnalyze(stmt: Statement.Analyze) {
+        requireTable(stmt.tableName)
     }
 }

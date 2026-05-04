@@ -28,6 +28,9 @@ class BufferPoolManager(
     // LRU eviction
     private val replacer = LruReplacer(poolSize)
 
+    /** WAL 콜백. Phase 5에서 주입된다. null이면 WAL 미사용. */
+    var walCallback: WalCallback? = null
+
     init {
         // 모든 프레임을 free list에 등록
         for (i in 0 until poolSize) {
@@ -46,6 +49,7 @@ class BufferPoolManager(
             val page = pages[frameId]
             page.pin()
             replacer.pin(frameId)
+            walCallback?.onPageFetched(pageId, page.data)
             return page
         }
 
@@ -66,6 +70,7 @@ class BufferPoolManager(
         replacer.pin(frameId)
 
         logger.debug { "Fetched page $pageId into frame $frameId" }
+        walCallback?.onPageFetched(pageId, page.data)
         return page
     }
 
@@ -87,6 +92,7 @@ class BufferPoolManager(
         replacer.pin(frameId)
 
         logger.debug { "Created new page $newPageId in frame $frameId" }
+        walCallback?.onPageFetched(newPageId, page.data)
         return page
     }
 
@@ -101,7 +107,11 @@ class BufferPoolManager(
 
         if (page.pinCount <= 0) return false
 
-        if (isDirty) page.isDirty = true
+        if (isDirty) {
+            page.isDirty = true
+            val lsn = walCallback?.onPageDirtyUnpin(pageId, page.data) ?: -1
+            if (lsn >= 0) page.pageLsn = lsn
+        }
         page.unpin()
 
         if (page.pinCount == 0) {
@@ -118,6 +128,7 @@ class BufferPoolManager(
         val frameId = pageTable[pageId] ?: return false
         val page = pages[frameId]
 
+        walCallback?.ensureLogFlushed(page.pageLsn)
         page.data.rewind()
         diskManager.writePage(pageId, page.data)
         page.data.rewind()
@@ -150,6 +161,7 @@ class BufferPoolManager(
 
         // dirty면 디스크에 기록
         if (victimPage.isDirty) {
+            walCallback?.ensureLogFlushed(victimPage.pageLsn)
             victimPage.data.rewind()
             diskManager.writePage(victimPage.pageId, victimPage.data)
             victimPage.data.rewind()

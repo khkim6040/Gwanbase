@@ -62,8 +62,9 @@ class ProjectOperator(
         fun buildOutputColumn(expr: Expression, childSchema: Schema): Column {
             return when (expr) {
                 is Expression.ColumnRef -> {
-                    val srcCol = childSchema.column(childSchema.columnIndex(expr.name))
-                    srcCol.copy()
+                    val index = ExpressionEvaluator.resolveColumnIndex(childSchema, expr)
+                    val srcCol = childSchema.column(index)
+                    srcCol.copy(name = expr.name)
                 }
                 else -> {
                     val type = inferType(expr, childSchema)
@@ -78,7 +79,10 @@ class ProjectOperator(
          */
         private fun inferType(expr: Expression, childSchema: Schema): DataType {
             return when (expr) {
-                is Expression.ColumnRef -> childSchema.column(childSchema.columnIndex(expr.name)).type
+                is Expression.ColumnRef -> {
+                    val index = ExpressionEvaluator.resolveColumnIndex(childSchema, expr)
+                    childSchema.column(index).type
+                }
                 is Expression.IntLiteral -> DataType.INT64
                 is Expression.FloatLiteral -> DataType.FLOAT64
                 is Expression.StringLiteral -> DataType.VARCHAR

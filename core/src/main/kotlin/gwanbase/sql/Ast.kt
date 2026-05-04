@@ -23,7 +23,7 @@ sealed class Statement {
     /** SELECT 문. */
     data class Select(
         val columns: List<SelectItem>,
-        val tableName: String,
+        val from: FromClause,
         val where: Expression?,
         val orderBy: OrderByClause?,
         val limit: Int?,
@@ -41,6 +41,42 @@ sealed class Statement {
         val tableName: String,
         val where: Expression?,
     ) : Statement()
+
+    /** 트랜잭션 시작. */
+    data object Begin : Statement()
+
+    /** 트랜잭션 커밋. */
+    data object Commit : Statement()
+
+    /** 트랜잭션 롤백. */
+    data object Rollback : Statement()
+
+    /** CREATE INDEX 문. */
+    data class CreateIndex(val indexName: String, val tableName: String, val columnName: String) : Statement()
+
+    /** DROP INDEX 문. */
+    data class DropIndex(val indexName: String) : Statement()
+
+    /** ANALYZE 문 (통계 수집). */
+    data class Analyze(val tableName: String) : Statement()
+
+    /** EXPLAIN 문 (실행 계획 표시). */
+    data class Explain(val statement: Statement) : Statement()
+}
+
+/**
+ * FROM 절 AST.
+ */
+sealed class FromClause {
+    /** 단일 테이블 참조. */
+    data class Table(val tableName: String, val alias: String? = null) : FromClause()
+
+    /** JOIN 절. */
+    data class Join(
+        val left: FromClause,
+        val right: FromClause,
+        val condition: Expression,
+    ) : FromClause()
 }
 
 /**
@@ -115,8 +151,8 @@ sealed class Expression {
     /** NULL 리터럴. */
     data object NullLiteral : Expression()
 
-    /** 컬럼 참조. */
-    data class ColumnRef(val name: String) : Expression()
+    /** 컬럼 참조. table이 null이면 단일 테이블에서 해석한다. */
+    data class ColumnRef(val table: String?, val name: String) : Expression()
 
     /** 이항 연산 (예: a + b, x = y). */
     data class BinaryOp(

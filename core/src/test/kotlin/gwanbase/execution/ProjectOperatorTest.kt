@@ -68,8 +68,8 @@ class ProjectOperatorTest {
         insertStudent(2, "Bob", 80)
 
         val projections = listOf(
-            SelectItem.ExprItem(Expression.ColumnRef("name")),
-            SelectItem.ExprItem(Expression.ColumnRef("score")),
+            SelectItem.ExprItem(Expression.ColumnRef(null,"name")),
+            SelectItem.ExprItem(Expression.ColumnRef(null,"score")),
         )
         val project = ProjectOperator(SeqScanOperator(database, "students"), projections)
 
@@ -89,8 +89,8 @@ class ProjectOperatorTest {
         insertStudent(1, "Alice", 90)
 
         val projections = listOf(
-            SelectItem.ExprItem(Expression.ColumnRef("score")),
-            SelectItem.ExprItem(Expression.ColumnRef("id")),
+            SelectItem.ExprItem(Expression.ColumnRef(null,"score")),
+            SelectItem.ExprItem(Expression.ColumnRef(null,"id")),
         )
         val project = ProjectOperator(SeqScanOperator(database, "students"), projections)
 
@@ -105,10 +105,10 @@ class ProjectOperatorTest {
 
         // score + 10
         val projections = listOf(
-            SelectItem.ExprItem(Expression.ColumnRef("name")),
+            SelectItem.ExprItem(Expression.ColumnRef(null,"name")),
             SelectItem.ExprItem(
                 Expression.BinaryOp(
-                    Expression.ColumnRef("score"),
+                    Expression.ColumnRef(null,"score"),
                     BinaryOperator.ADD,
                     Expression.IntLiteral(10),
                 )
@@ -124,7 +124,7 @@ class ProjectOperatorTest {
 
     @Test
     fun `빈 입력이면 빈 결과`() {
-        val projections = listOf(SelectItem.ExprItem(Expression.ColumnRef("name")))
+        val projections = listOf(SelectItem.ExprItem(Expression.ColumnRef(null,"name")))
         val project = ProjectOperator(SeqScanOperator(database, "students"), projections)
 
         collectAll(project).size shouldBe 0
@@ -135,8 +135,8 @@ class ProjectOperatorTest {
         insertStudent(1, null, null)
 
         val projections = listOf(
-            SelectItem.ExprItem(Expression.ColumnRef("name")),
-            SelectItem.ExprItem(Expression.ColumnRef("score")),
+            SelectItem.ExprItem(Expression.ColumnRef(null,"name")),
+            SelectItem.ExprItem(Expression.ColumnRef(null,"score")),
         )
         val project = ProjectOperator(SeqScanOperator(database, "students"), projections)
 

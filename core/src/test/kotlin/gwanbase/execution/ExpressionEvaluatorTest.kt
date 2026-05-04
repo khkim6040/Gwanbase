@@ -54,17 +54,17 @@ class ExpressionEvaluatorTest {
 
     @Test
     fun `컬럼 참조로 INT 값 꺼내기`() {
-        ExpressionEvaluator.evaluate(schema, tuple, Expression.ColumnRef("id")) shouldBe 1
+        ExpressionEvaluator.evaluate(schema, tuple, Expression.ColumnRef(null,"id")) shouldBe 1
     }
 
     @Test
     fun `컬럼 참조로 VARCHAR 값 꺼내기`() {
-        ExpressionEvaluator.evaluate(schema, tuple, Expression.ColumnRef("name")) shouldBe "Alice"
+        ExpressionEvaluator.evaluate(schema, tuple, Expression.ColumnRef(null,"name")) shouldBe "Alice"
     }
 
     @Test
     fun `NULL 컬럼 참조`() {
-        ExpressionEvaluator.evaluate(schema, nullTuple, Expression.ColumnRef("name")) shouldBe null
+        ExpressionEvaluator.evaluate(schema, nullTuple, Expression.ColumnRef(null,"name")) shouldBe null
     }
 
     // ── 산술 연산 ──
@@ -72,7 +72,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `정수 덧셈`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.ADD,
             Expression.IntLiteral(10),
         )
@@ -82,7 +82,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `정수 나눗셈`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.DIV,
             Expression.IntLiteral(3),
         )
@@ -92,7 +92,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `실수 곱셈`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("rate"),
+            Expression.ColumnRef(null,"rate"),
             BinaryOperator.MUL,
             Expression.FloatLiteral(2.0),
         )
@@ -102,7 +102,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `NULL과 산술 연산 시 NULL 반환`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.ADD,
             Expression.IntLiteral(10),
         )
@@ -114,7 +114,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `정수 비교 EQ`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.EQ,
             Expression.IntLiteral(90),
         )
@@ -124,7 +124,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `정수 비교 GTE`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.GTE,
             Expression.IntLiteral(80),
         )
@@ -134,7 +134,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `문자열 비교`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("name"),
+            Expression.ColumnRef(null,"name"),
             BinaryOperator.EQ,
             Expression.StringLiteral("Alice"),
         )
@@ -144,7 +144,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `NULL과 비교 시 NULL 반환`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.EQ,
             Expression.IntLiteral(90),
         )
@@ -233,25 +233,25 @@ class ExpressionEvaluatorTest {
 
     @Test
     fun `IS NULL - NULL 값이면 true`() {
-        val expr = Expression.IsNull(Expression.ColumnRef("name"))
+        val expr = Expression.IsNull(Expression.ColumnRef(null,"name"))
         ExpressionEvaluator.evaluate(schema, nullTuple, expr) shouldBe true
     }
 
     @Test
     fun `IS NULL - 값이 있으면 false`() {
-        val expr = Expression.IsNull(Expression.ColumnRef("name"))
+        val expr = Expression.IsNull(Expression.ColumnRef(null,"name"))
         ExpressionEvaluator.evaluate(schema, tuple, expr) shouldBe false
     }
 
     @Test
     fun `IS NOT NULL - 값이 있으면 true`() {
-        val expr = Expression.IsNotNull(Expression.ColumnRef("name"))
+        val expr = Expression.IsNotNull(Expression.ColumnRef(null,"name"))
         ExpressionEvaluator.evaluate(schema, tuple, expr) shouldBe true
     }
 
     @Test
     fun `IS NOT NULL - NULL이면 false`() {
-        val expr = Expression.IsNotNull(Expression.ColumnRef("name"))
+        val expr = Expression.IsNotNull(Expression.ColumnRef(null,"name"))
         ExpressionEvaluator.evaluate(schema, nullTuple, expr) shouldBe false
     }
 
@@ -260,7 +260,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `evaluateCondition - true 결과는 true`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.GTE,
             Expression.IntLiteral(80),
         )
@@ -270,7 +270,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `evaluateCondition - false 결과는 false`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.LT,
             Expression.IntLiteral(80),
         )
@@ -280,7 +280,7 @@ class ExpressionEvaluatorTest {
     @Test
     fun `evaluateCondition - NULL 결과는 false`() {
         val expr = Expression.BinaryOp(
-            Expression.ColumnRef("score"),
+            Expression.ColumnRef(null,"score"),
             BinaryOperator.EQ,
             Expression.IntLiteral(90),
         )

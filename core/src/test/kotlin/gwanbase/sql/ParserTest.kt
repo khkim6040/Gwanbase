@@ -202,7 +202,7 @@ class ParserTest {
         stmt.shouldBeInstanceOf<Statement.Select>()
         stmt.columns.size shouldBe 1
         stmt.columns[0].shouldBeInstanceOf<SelectItem.Star>()
-        stmt.tableName shouldBe "users"
+        stmt.from shouldBe FromClause.Table("users")
         stmt.where shouldBe null
         stmt.orderBy shouldBe null
         stmt.limit shouldBe null
@@ -213,7 +213,7 @@ class ParserTest {
         val stmt = parse("SELECT name, age FROM users WHERE age >= 18;")
         stmt.shouldBeInstanceOf<Statement.Select>()
         stmt.columns.size shouldBe 2
-        stmt.tableName shouldBe "users"
+        stmt.from shouldBe FromClause.Table("users")
         stmt.where.shouldBeInstanceOf<Expression.BinaryOp>()
     }
 
@@ -235,7 +235,7 @@ class ParserTest {
     fun `SELECT 전체 절 결합`() {
         val stmt = parse("SELECT name FROM users WHERE age > 20 ORDER BY name ASC LIMIT 5;")
         stmt.shouldBeInstanceOf<Statement.Select>()
-        stmt.tableName shouldBe "users"
+        stmt.from shouldBe FromClause.Table("users")
         stmt.where.shouldBeInstanceOf<Expression.BinaryOp>()
         stmt.orderBy shouldBe OrderByClause("name", ascending = true)
         stmt.limit shouldBe 5
@@ -339,5 +339,173 @@ class ParserTest {
     fun `세미콜론 없이도 파싱된다`() {
         val stmt = parse("SELECT * FROM users")
         stmt.shouldBeInstanceOf<Statement.Select>()
+    }
+
+    // ── 트랜잭션 제어 ──
+
+    @Test
+    fun `BEGIN 문을 파싱한다`() {
+        val stmt = parse("BEGIN")
+        stmt shouldBe Statement.Begin
+    }
+
+    @Test
+    fun `COMMIT 문을 파싱한다`() {
+        val stmt = parse("COMMIT")
+        stmt shouldBe Statement.Commit
+    }
+
+    @Test
+    fun `ROLLBACK 문을 파싱한다`() {
+        val stmt = parse("ROLLBACK")
+        stmt shouldBe Statement.Rollback
+    }
+
+    @Test
+    fun `BEGIN 문 뒤에 세미콜론을 허용한다`() {
+        val stmt = parse("BEGIN;")
+        stmt shouldBe Statement.Begin
+    }
+
+    // ── CREATE INDEX / DROP INDEX / ANALYZE / EXPLAIN ──
+
+    @Test
+    fun `CREATE INDEX 파싱`() {
+        val stmt = parse("CREATE INDEX idx_age ON users (age);")
+        stmt shouldBe Statement.CreateIndex("idx_age", "users", "age")
+    }
+
+    @Test
+    fun `CREATE INDEX 세미콜론 없이 파싱`() {
+        val stmt = parse("CREATE INDEX idx_name ON products (name)")
+        stmt shouldBe Statement.CreateIndex("idx_name", "products", "name")
+    }
+
+    @Test
+    fun `DROP INDEX 파싱`() {
+        val stmt = parse("DROP INDEX idx_age;")
+        stmt shouldBe Statement.DropIndex("idx_age")
+    }
+
+    @Test
+    fun `DROP INDEX 세미콜론 없이 파싱`() {
+        val stmt = parse("DROP INDEX idx_name")
+        stmt shouldBe Statement.DropIndex("idx_name")
+    }
+
+    @Test
+    fun `ANALYZE 파싱`() {
+        val stmt = parse("ANALYZE users;")
+        stmt shouldBe Statement.Analyze("users")
+    }
+
+    @Test
+    fun `ANALYZE 세미콜론 없이 파싱`() {
+        val stmt = parse("ANALYZE products")
+        stmt shouldBe Statement.Analyze("products")
+    }
+
+    @Test
+    fun `EXPLAIN SELECT 파싱`() {
+        val stmt = parse("EXPLAIN SELECT * FROM users;")
+        stmt.shouldBeInstanceOf<Statement.Explain>()
+        val inner = stmt.statement.shouldBeInstanceOf<Statement.Select>()
+        inner.from shouldBe FromClause.Table("users")
+    }
+
+    @Test
+    fun `EXPLAIN SELECT WHERE 파싱`() {
+        val stmt = parse("EXPLAIN SELECT name FROM users WHERE age > 18;")
+        stmt.shouldBeInstanceOf<Statement.Explain>()
+        val inner = stmt.statement.shouldBeInstanceOf<Statement.Select>()
+        inner.from shouldBe FromClause.Table("users")
+        inner.where.shouldBeInstanceOf<Expression.BinaryOp>()
+    }
+
+    @Test
+    fun `CREATE 뒤에 잘못된 토큰은 에러`() {
+        assertThrows<ParseException> { parse("CREATE SOMETHING") }
+    }
+
+    @Test
+    fun `DROP 뒤에 잘못된 토큰은 에러`() {
+        assertThrows<ParseException> { parse("DROP SOMETHING") }
+    }
+
+    // ── JOIN / 테이블 별칭 / 테이블 한정 컬럼 참조 ──
+
+    @Test
+    fun `단일 테이블 별칭 파싱`() {
+        val stmt = parse("SELECT * FROM users u;")
+        stmt.shouldBeInstanceOf<Statement.Select>()
+        val from = stmt.from.shouldBeInstanceOf<FromClause.Table>()
+        from.tableName shouldBe "users"
+        from.alias shouldBe "u"
+    }
+
+    @Test
+    fun `테이블 한정 컬럼 참조 파싱`() {
+        val expr = parseExpr("u.name")
+        expr.shouldBeInstanceOf<Expression.ColumnRef>()
+        expr.table shouldBe "u"
+        expr.name shouldBe "name"
+    }
+
+    @Test
+    fun `INNER JOIN 파싱`() {
+        val stmt = parse("SELECT u.id, o.amount FROM users u JOIN orders o ON u.id = o.user_id;")
+        stmt.shouldBeInstanceOf<Statement.Select>()
+        val from = stmt.from.shouldBeInstanceOf<FromClause.Join>()
+        val left = from.left.shouldBeInstanceOf<FromClause.Table>()
+        left.tableName shouldBe "users"
+        left.alias shouldBe "u"
+        val right = from.right.shouldBeInstanceOf<FromClause.Table>()
+        right.tableName shouldBe "orders"
+        right.alias shouldBe "o"
+        val cond = from.condition.shouldBeInstanceOf<Expression.BinaryOp>()
+        cond.op shouldBe BinaryOperator.EQ
+        val condLeft = cond.left.shouldBeInstanceOf<Expression.ColumnRef>()
+        condLeft.table shouldBe "u"
+        condLeft.name shouldBe "id"
+        val condRight = cond.right.shouldBeInstanceOf<Expression.ColumnRef>()
+        condRight.table shouldBe "o"
+        condRight.name shouldBe "user_id"
+    }
+
+    @Test
+    fun `별칭 없는 JOIN 파싱`() {
+        val stmt = parse("SELECT * FROM users JOIN orders ON users.id = orders.user_id;")
+        stmt.shouldBeInstanceOf<Statement.Select>()
+        val from = stmt.from.shouldBeInstanceOf<FromClause.Join>()
+        val left = from.left.shouldBeInstanceOf<FromClause.Table>()
+        left.tableName shouldBe "users"
+        left.alias shouldBe null
+        val right = from.right.shouldBeInstanceOf<FromClause.Table>()
+        right.tableName shouldBe "orders"
+        right.alias shouldBe null
+    }
+
+    @Test
+    fun `기존 단일 테이블 SELECT 회귀 테스트`() {
+        val stmt = parse("SELECT id, name FROM users WHERE age > 10 ORDER BY name LIMIT 5;")
+        stmt.shouldBeInstanceOf<Statement.Select>()
+        val from = stmt.from.shouldBeInstanceOf<FromClause.Table>()
+        from.tableName shouldBe "users"
+        from.alias shouldBe null
+        stmt.where.shouldBeInstanceOf<Expression.BinaryOp>()
+        stmt.orderBy shouldBe OrderByClause("name", ascending = true)
+        stmt.limit shouldBe 5
+    }
+
+    @Test
+    fun `다중 JOIN 체이닝 파싱`() {
+        val stmt = parse("SELECT * FROM a JOIN b ON a.id = b.a_id JOIN c ON b.id = c.b_id;")
+        stmt.shouldBeInstanceOf<Statement.Select>()
+        val outerJoin = stmt.from.shouldBeInstanceOf<FromClause.Join>()
+        // 좌결합: (a JOIN b) JOIN c
+        val innerJoin = outerJoin.left.shouldBeInstanceOf<FromClause.Join>()
+        innerJoin.left.shouldBeInstanceOf<FromClause.Table>().tableName shouldBe "a"
+        innerJoin.right.shouldBeInstanceOf<FromClause.Table>().tableName shouldBe "b"
+        outerJoin.right.shouldBeInstanceOf<FromClause.Table>().tableName shouldBe "c"
     }
 }

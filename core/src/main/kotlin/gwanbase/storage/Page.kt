@@ -29,6 +29,10 @@ class Page(
     @Volatile
     var isDirty: Boolean = false
 
+    /** 이 페이지를 마지막으로 수정한 로그 레코드의 LSN */
+    @Volatile
+    var pageLsn: Int = 0
+
     private val latch = ReentrantReadWriteLock()
 
     fun pin() {
@@ -56,5 +60,6 @@ class Page(
         data.flip()
         pinCount = 0
         isDirty = false
+        pageLsn = 0
     }
 }

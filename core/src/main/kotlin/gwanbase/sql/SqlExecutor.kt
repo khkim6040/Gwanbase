@@ -2,7 +2,10 @@ package gwanbase.sql
 
 import gwanbase.execution.ExpressionEvaluator
 import gwanbase.execution.Planner
+import gwanbase.optimizer.Optimizer
+import gwanbase.optimizer.StatisticsManager
 import gwanbase.table.*
+import gwanbase.txn.DatabaseSession
 
 /**
  * SQL 실행 결과.
@@ -25,6 +28,27 @@ sealed class ExecuteResult {
 
     /** DELETE 결과. */
     data class Deleted(val count: Int) : ExecuteResult()
+
+    /** BEGIN 결과. */
+    data object TransactionStarted : ExecuteResult()
+
+    /** COMMIT 결과. */
+    data object TransactionCommitted : ExecuteResult()
+
+    /** ROLLBACK 결과. */
+    data object TransactionRolledBack : ExecuteResult()
+
+    /** CREATE INDEX 결과. */
+    data class IndexCreated(val indexName: String) : ExecuteResult()
+
+    /** DROP INDEX 결과. */
+    data class IndexDropped(val indexName: String) : ExecuteResult()
+
+    /** ANALYZE 결과. */
+    data class Analyzed(val tableName: String, val rowCount: Long) : ExecuteResult()
+
+    /** EXPLAIN 결과. */
+    data class Explained(val planText: String) : ExecuteResult()
 }
 
 /**
@@ -36,9 +60,12 @@ sealed class ExecuteResult {
  *
  * @param database 대상 데이터베이스
  */
-class SqlExecutor(private val database: Database) {
+class SqlExecutor(
+    private val database: Database,
+    private val session: DatabaseSession? = null,
+) {
 
-    private val planner = Planner(database)
+    private val planner = Planner(database, session)
 
     /**
      * SQL 문을 실행한다.
@@ -58,7 +85,7 @@ class SqlExecutor(private val database: Database) {
 
     // ── 문(statement) 실행 ──
 
-    private fun executeStatement(stmt: Statement): ExecuteResult {
+    internal fun executeStatement(stmt: Statement): ExecuteResult {
         return when (stmt) {
             is Statement.CreateTable -> executeCreateTable(stmt)
             is Statement.DropTable -> executeDropTable(stmt)
@@ -66,6 +93,33 @@ class SqlExecutor(private val database: Database) {
             is Statement.Select -> executeSelect(stmt)
             is Statement.Update -> executeUpdate(stmt)
             is Statement.Delete -> executeDelete(stmt)
+            is Statement.Begin -> error("BEGIN은 DatabaseSession에서 처리한다")
+            is Statement.Commit -> error("COMMIT은 DatabaseSession에서 처리한다")
+            is Statement.Rollback -> error("ROLLBACK은 DatabaseSession에서 처리한다")
+            is Statement.CreateIndex -> {
+                database.createIndex(stmt.indexName, stmt.tableName, stmt.columnName)
+                ExecuteResult.IndexCreated(stmt.indexName)
+            }
+            is Statement.DropIndex -> {
+                database.dropIndex(stmt.indexName)
+                ExecuteResult.IndexDropped(stmt.indexName)
+            }
+            is Statement.Analyze -> {
+                val statsManager = StatisticsManager(database.getCatalog())
+                val rowCount = statsManager.analyze(database, stmt.tableName)
+                ExecuteResult.Analyzed(stmt.tableName, rowCount)
+            }
+            is Statement.Explain -> {
+                val inner = stmt.statement
+                if (inner !is Statement.Select) {
+                    throw BindException("EXPLAIN은 SELECT 문만 지원한다")
+                }
+                val binder = Binder(database.getCatalog())
+                binder.bind(inner)
+                val optimizer = Optimizer(database.getCatalog())
+                val plan = optimizer.optimize(inner)
+                ExecuteResult.Explained(plan.explain())
+            }
         }
     }
 
@@ -109,17 +163,21 @@ class SqlExecutor(private val database: Database) {
         }
 
         val tuple = Tuple(schema, valuesArray)
-        val rid = database.insertTuple(stmt.tableName, tuple)
+        val rid = session?.insertTupleWithLock(stmt.tableName, tuple)
+            ?: database.insertTuple(stmt.tableName, tuple)
         return ExecuteResult.Inserted(rid)
     }
 
     /**
-     * SELECT 문을 Volcano 모델로 실행한다.
+     * SELECT 문을 Optimizer + Volcano 모델로 실행한다.
      *
-     * Planner가 생성한 연산자 트리를 구동하여 결과를 수집한다.
+     * Optimizer가 비용 기반으로 최적 계획을 선택하고,
+     * Planner가 계획을 연산자 트리로 변환하여 결과를 수집한다.
      */
     private fun executeSelect(stmt: Statement.Select): ExecuteResult.Selected {
-        val op = planner.planSelect(stmt)
+        val optimizer = Optimizer(database.getCatalog())
+        val plan = optimizer.optimize(stmt)
+        val op = planner.toOperator(plan)
 
         op.open()
         try {
@@ -154,6 +212,8 @@ class SqlExecutor(private val database: Database) {
         val schema = tableInfo.schema
 
         // 스캔 + 필터 → 리스트로 수집 (반복 중 변경 방지)
+        // UPDATE/DELETE 스캔은 잠금 없이 수행하고, 변경 시점에 X 잠금을 획득한다.
+        // 스캔 시 S 잠금을 걸면 이후 X 업그레이드에서 데드락이 발생할 수 있다.
         val matches = mutableListOf<Pair<RID, Tuple>>()
         val iter = database.scanTable(stmt.tableName)
         while (iter.hasNext()) {
@@ -163,17 +223,27 @@ class SqlExecutor(private val database: Database) {
             }
         }
 
-        for ((rid, tuple) in matches) {
+        for ((rid, _) in matches) {
+            // X 잠금 획득 후 최신 튜플을 다시 읽어 Lost Update를 방지한다.
+            // 잠금 없이 스캔한 튜플은 stale할 수 있으므로, 잠금 획득 후 재조회한다.
+            if (session != null) {
+                session.acquireExclusiveLock(stmt.tableName, rid)
+            }
+            val freshTuple = database.getTuple(stmt.tableName, rid) ?: continue
             val newValues = Array<Any?>(schema.columnCount) { i ->
-                ExpressionEvaluator.getTupleValue(tuple, i, schema.column(i).type)
+                ExpressionEvaluator.getTupleValue(freshTuple, i, schema.column(i).type)
             }
             for (assignment in stmt.assignments) {
                 val colIndex = schema.columnIndex(assignment.column)
-                val rawValue = ExpressionEvaluator.evaluate(schema, tuple, assignment.value)
+                val rawValue = ExpressionEvaluator.evaluate(schema, freshTuple, assignment.value)
                 newValues[colIndex] = coerceValue(rawValue, schema.column(colIndex).type)
             }
             val newTuple = Tuple(schema, newValues)
-            database.updateTuple(stmt.tableName, rid, newTuple)
+            if (session != null) {
+                session.updateTupleWithLockAlreadyHeld(stmt.tableName, rid, newTuple)
+            } else {
+                database.updateTuple(stmt.tableName, rid, newTuple)
+            }
         }
 
         return ExecuteResult.Updated(matches.size)
@@ -189,6 +259,7 @@ class SqlExecutor(private val database: Database) {
         val tableInfo = database.getTable(stmt.tableName)!!
         val schema = tableInfo.schema
 
+        // UPDATE와 동일한 이유로 스캔은 잠금 없이 수행하고, 삭제 시점에 X 잠금을 획득한다.
         val toDelete = mutableListOf<RID>()
         val iter = database.scanTable(stmt.tableName)
         while (iter.hasNext()) {
@@ -199,7 +270,8 @@ class SqlExecutor(private val database: Database) {
         }
 
         for (rid in toDelete) {
-            database.deleteTuple(stmt.tableName, rid)
+            session?.deleteTupleWithLock(stmt.tableName, rid)
+                ?: database.deleteTuple(stmt.tableName, rid)
         }
 
         return ExecuteResult.Deleted(toDelete.size)
