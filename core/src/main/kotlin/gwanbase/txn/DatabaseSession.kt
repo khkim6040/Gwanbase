@@ -170,14 +170,18 @@ class DatabaseSession(
     /**
      * 트랜잭션을 중단하고 dirty page의 before-image를 복원한다.
      *
-     * currentTxnHolder를 먼저 제거하여 복원 중 WalCallback이 추가 로그를 기록하지 않도록 한다.
+     * WAL 프로토콜에 따라 각 undo 동작마다 CLR(Compensation Log Record)을 기록한다.
+     * crash 시 Recovery의 Redo 단계에서 CLR이 재적용되어 undo의 내구성을 보장한다.
+     *
+     * WalCallback이 undo 중 추가 Update 로그를 기록하지 않도록 currentTxnHolder를
+     * undo 시작 전에 제거하되, CLR은 LogManager에 직접 기록한다.
      */
     private fun abortInternal(txn: TransactionContext) {
-        currentTxn = null
+        // WalCallback이 before-image 복원 시 추가 Update 로그를 쓰지 않도록 제거
         database.currentTxnHolder.remove()
 
         database.logManager?.let { lm ->
-            // Runtime undo: Update 로그의 before-image를 버퍼 풀에 복원
+            // Runtime undo: Update 로그의 before-image를 버퍼 풀에 복원하고 CLR 기록
             var lsn = txn.lastLsn
             while (lsn >= 0) {
                 val record = lm.getRecord(lsn)
@@ -190,6 +194,15 @@ class DatabaseSession(
                             page.data.flip()
                             database.bpm.unpinPage(record.pageId, isDirty = true)
                         }
+                        // CLR 기록: undo 동작의 내구성을 보장
+                        val clrLsn = lm.appendCLR(
+                            txnId = txn.txnId,
+                            prevLsn = txn.lastLsn,
+                            pageId = record.pageId,
+                            beforeImage = record.beforeImage,
+                            undoNextLsn = record.prevLsn,
+                        )
+                        txn.lastLsn = clrLsn
                         lsn = record.prevLsn
                     }
                     is LogRecord.Begin -> break
@@ -199,6 +212,7 @@ class DatabaseSession(
             val abortLsn = lm.appendAbort(txn.txnId, txn.lastLsn)
             lm.flush(abortLsn)
         }
+        currentTxn = null
         lockManager.releaseAll(txn.txnId)
     }
 }

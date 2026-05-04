@@ -102,6 +102,52 @@ class CrashRecoveryIntegrationTest {
     }
 
     @Test
+    fun `abort 중 CLR 기록 후 crash 시 복구 정합성`() {
+        // 1. 테이블 생성 및 커밋된 데이터 삽입
+        val db = Database.open(dbPath())
+        db.executeSql("CREATE TABLE t (id INT NOT NULL, name VARCHAR(50))")
+        db.executeSql("INSERT INTO t (id, name) VALUES (1, 'Alice')")
+
+        // 2. 명시적 트랜잭션 내에서 INSERT 후 ROLLBACK → CLR이 기록되어야 한다
+        val session = db.createSession()
+        session.executeSql("BEGIN")
+        session.executeSql("INSERT INTO t (id, name) VALUES (2, 'Bob')")
+        session.executeSql("ROLLBACK")
+
+        // 3. crash 시뮬레이션 (checkpoint 없이 닫기)
+        db.closeWithoutCheckpoint()
+
+        // 4. Recovery 수행 후 rollback된 행이 존재하지 않아야 한다
+        val recovered = Database.open(dbPath())
+        val result = recovered.executeSql("SELECT * FROM t") as ExecuteResult.Selected
+        result.rows.size shouldBe 1
+        result.rows[0][0] shouldBe 1
+        result.rows[0][1] shouldBe "Alice"
+        recovered.close()
+    }
+
+    @Test
+    fun `abort된 UPDATE는 crash 후 recovery에서 원래 값으로 복원된다`() {
+        val db = Database.open(dbPath())
+        db.executeSql("CREATE TABLE t (id INT NOT NULL, value INT NOT NULL)")
+        db.executeSql("INSERT INTO t (id, value) VALUES (1, 100)")
+
+        // 명시적 트랜잭션 내에서 UPDATE 후 ROLLBACK
+        val session = db.createSession()
+        session.executeSql("BEGIN")
+        session.executeSql("UPDATE t SET value = 999 WHERE id = 1")
+        session.executeSql("ROLLBACK")
+
+        db.closeWithoutCheckpoint()
+
+        val recovered = Database.open(dbPath())
+        val result = recovered.executeSql("SELECT value FROM t WHERE id = 1") as ExecuteResult.Selected
+        result.rows.size shouldBe 1
+        result.rows[0][0] shouldBe 100
+        recovered.close()
+    }
+
+    @Test
     fun `여러 트랜잭션 커밋 후 crash 시 모든 데이터 복구`() {
         val db = Database.open(dbPath())
         db.executeSql("CREATE TABLE t (id INT NOT NULL)")
