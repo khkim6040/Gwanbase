@@ -34,15 +34,17 @@ class DeadlockException(val victimTxnId: Int) : RuntimeException(
  */
 class LockManager {
 
-    /** 잠금 보유자 정보. */
-    internal data class TxnHolder(val txnId: Int, val mode: LockMode)
-
     /** 잠금 대기 요청. */
     internal data class LockRequest(val txnId: Int, val mode: LockMode, val latch: CountDownLatch)
 
-    /** 대상별 잠금 상태. */
+    /**
+     * 대상별 잠금 상태.
+     *
+     * holders: txnId → LockMode 매핑. grantWaiters()에서 countDown() 호출 전에
+     * 즉시 반영하여 EXCLUSIVE 잠금 중복 부여를 방지한다.
+     */
     internal class LockEntry {
-        val holders: MutableSet<TxnHolder> = mutableSetOf()
+        val holders: MutableMap<Int, LockMode> = mutableMapOf()
         val waitQueue: MutableList<LockRequest> = mutableListOf()
     }
 
@@ -66,30 +68,29 @@ class LockManager {
             var blockers: Set<Int> = emptySet()
 
             synchronized(entry) {
-                val existing = entry.holders.find { it.txnId == txnId }
+                val existingMode = entry.holders[txnId]
                 when {
-                    existing != null && (existing.mode == mode || existing.mode == LockMode.EXCLUSIVE) -> {
+                    existingMode != null && (existingMode == mode || existingMode == LockMode.EXCLUSIVE) -> {
                         // 이미 같은 모드 이상을 보유 중이면 즉시 반환
                         return
                     }
-                    existing != null && mode == LockMode.EXCLUSIVE -> {
+                    existingMode != null && mode == LockMode.EXCLUSIVE -> {
                         // S → X 업그레이드
-                        val otherHolders = entry.holders.filter { it.txnId != txnId }
-                        if (otherHolders.isEmpty()) {
+                        val otherHolderIds = entry.holders.keys.filter { it != txnId }
+                        if (otherHolderIds.isEmpty()) {
                             // 다른 보유자 없음: 즉시 업그레이드
-                            entry.holders.remove(existing)
-                            entry.holders.add(TxnHolder(txnId, LockMode.EXCLUSIVE))
+                            entry.holders[txnId] = LockMode.EXCLUSIVE
                             return
                         }
                         // 다른 보유자 있음: 대기 요청 생성 후 synchronized 블록 밖에서 대기
                         request = LockRequest(txnId, mode, CountDownLatch(1))
                         entry.waitQueue.add(request!!)
                         // blockers를 synchronized 블록 안에서 캡처
-                        blockers = otherHolders.map { it.txnId }.toSet()
+                        blockers = otherHolderIds.toSet()
                     }
                     isCompatible(entry, txnId, mode) -> {
                         // 호환 가능: 즉시 획득
-                        entry.holders.add(TxnHolder(txnId, mode))
+                        entry.holders[txnId] = mode
                         return
                     }
                     else -> {
@@ -97,9 +98,8 @@ class LockManager {
                         request = LockRequest(txnId, mode, CountDownLatch(1))
                         entry.waitQueue.add(request!!)
                         // blockers를 synchronized 블록 안에서 캡처
-                        blockers = entry.holders
-                            .filter { it.txnId != txnId }
-                            .map { it.txnId }
+                        blockers = entry.holders.keys
+                            .filter { it != txnId }
                             .toSet()
                     }
                 }
@@ -114,15 +114,7 @@ class LockManager {
                     throw DeadlockException(txnId)
                 }
                 request!!.latch.await()
-                // 깨어난 후 holders에 추가
-                synchronized(entry) {
-                    val existing = entry.holders.find { it.txnId == txnId }
-                    if (existing != null && mode == LockMode.EXCLUSIVE) {
-                        // S→X 업그레이드: 기존 S 잠금 제거 후 X 잠금 추가
-                        entry.holders.remove(existing)
-                    }
-                    entry.holders.add(TxnHolder(txnId, mode))
-                }
+                // grantWaiters()에서 이미 holders에 추가했으므로 별도 처리 불필요
                 return
             }
         }
@@ -134,8 +126,8 @@ class LockManager {
     fun releaseAll(txnId: Int) {
         for ((_, entry) in locks) {
             synchronized(entry) {
-                val removed = entry.holders.removeAll { it.txnId == txnId }
-                if (removed) {
+                val removed = entry.holders.remove(txnId)
+                if (removed != null) {
                     grantWaiters(entry)
                 }
                 entry.waitQueue.removeAll { it.txnId == txnId }
@@ -160,11 +152,18 @@ class LockManager {
     private fun isCompatibleWithHolders(entry: LockEntry, txnId: Int, mode: LockMode): Boolean {
         if (entry.holders.isEmpty()) return true
         return when (mode) {
-            LockMode.SHARED -> entry.holders.all { it.mode == LockMode.SHARED || it.txnId == txnId }
-            LockMode.EXCLUSIVE -> entry.holders.all { it.txnId == txnId }
+            LockMode.SHARED -> entry.holders.all { (id, m) -> m == LockMode.SHARED || id == txnId }
+            LockMode.EXCLUSIVE -> entry.holders.all { (id, _) -> id == txnId }
         }
     }
 
+    /**
+     * 대기열의 요청을 순서대로 평가하여 호환 가능한 잠금을 부여한다.
+     *
+     * 잠금을 부여할 때 holders에 먼저 반영한 후 countDown()을 호출하여,
+     * 다음 대기 요청 평가 시 방금 부여된 잠금이 반영되도록 한다.
+     * 이로써 EXCLUSIVE 잠금이 동시에 두 트랜잭션에 부여되는 문제를 방지한다.
+     */
     private fun grantWaiters(entry: LockEntry) {
         val iterator = entry.waitQueue.iterator()
         while (iterator.hasNext()) {
@@ -173,6 +172,9 @@ class LockManager {
             // isCompatible이 자기 자신을 대기열에서 보지 않는다
             iterator.remove()
             if (isCompatibleWithHolders(entry, request.txnId, request.mode)) {
+                // 1. holders에 먼저 반영
+                entry.holders[request.txnId] = request.mode
+                // 2. 대기 중인 스레드를 깨운다
                 request.latch.countDown()
             } else {
                 // 호환 불가: 다시 대기열 앞에 복원하고 중단 (FIFO 순서 유지)
@@ -203,14 +205,24 @@ class LockManager {
     }
 
     /**
-     * 주어진 트랜잭션이 대기 중인 대상의 보유자 트랜잭션 ID 집합을 반환한다.
+     * 주어진 트랜잭션이 대기 중인 대상의 보유자 및 선행 대기자 트랜잭션 ID 집합을 반환한다.
+     *
+     * 각 LockEntry에 대해 synchronized 블록으로 보호하여,
+     * 다른 스레드의 동시 수정으로 인한 ConcurrentModificationException을 방지한다.
      */
     private fun getWaitingFor(txnId: Int): Set<Int> {
         val result = mutableSetOf<Int>()
         for ((_, entry) in locks) {
-            val isWaiting = entry.waitQueue.any { it.txnId == txnId }
-            if (isWaiting) {
-                result.addAll(entry.holders.map { it.txnId })
+            synchronized(entry) {
+                val isWaiting = entry.waitQueue.any { it.txnId == txnId }
+                if (isWaiting) {
+                    result.addAll(entry.holders.keys)
+                    result.addAll(
+                        entry.waitQueue
+                            .takeWhile { it.txnId != txnId }
+                            .map { it.txnId }
+                    )
+                }
             }
         }
         result.remove(txnId)
