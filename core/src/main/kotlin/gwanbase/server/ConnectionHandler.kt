@@ -1,5 +1,6 @@
 package gwanbase.server
 
+import gwanbase.sql.ExecuteResult
 import gwanbase.table.Database
 import gwanbase.txn.DatabaseSession
 import mu.KotlinLogging
@@ -81,23 +82,20 @@ class ConnectionHandler(
     }
 
     private fun handleQuery(sql: String, session: DatabaseSession, writer: PgMessageWriter) {
-        if (txnFailed) {
-            val trimmed = sql.trim().uppercase()
-            if (trimmed != "ROLLBACK") {
-                writer.write(PgMessage.ErrorResponse(
-                    "ERROR",
-                    "current transaction is aborted, commands ignored until end of transaction block",
-                    "25P02",
-                ))
-                writer.write(PgMessage.ReadyForQuery('E'))
-                writer.flush()
-                return
-            }
+        if (txnFailed && !isRollbackCommand(sql)) {
+            writer.write(PgMessage.ErrorResponse(
+                "ERROR",
+                "current transaction is aborted, commands ignored until end of transaction block",
+                "25P02",
+            ))
+            writer.write(PgMessage.ReadyForQuery('E'))
+            writer.flush()
+            return
         }
 
         try {
             val result = session.executeSql(sql)
-            updateTxnState(sql, failed = false)
+            updateTxnState(result)
             val messages = ResultFormatter.format(result)
             for (m in messages) {
                 writer.write(m)
@@ -105,7 +103,7 @@ class ConnectionHandler(
             writer.write(PgMessage.ReadyForQuery(currentTxnStatus()))
             writer.flush()
         } catch (e: Exception) {
-            updateTxnState(sql, failed = true)
+            if (inTransaction) txnFailed = true
             writer.write(PgMessage.ErrorResponse(
                 severity = "ERROR",
                 message = e.message ?: "내부 오류",
@@ -116,21 +114,35 @@ class ConnectionHandler(
         }
     }
 
-    private fun updateTxnState(sql: String, failed: Boolean) {
-        val trimmed = sql.trim().uppercase()
-        when {
-            trimmed == "BEGIN" && !failed -> {
+    /**
+     * ExecuteResult 타입을 기반으로 트랜잭션 상태를 갱신한다.
+     *
+     * SQL 문자열 비교 대신 실행 결과 타입으로 판단하여
+     * 세미콜론, 공백 변형 등에 안전하다.
+     */
+    private fun updateTxnState(result: ExecuteResult) {
+        when (result) {
+            is ExecuteResult.TransactionStarted -> {
                 inTransaction = true
                 txnFailed = false
             }
-            (trimmed == "COMMIT" || trimmed == "ROLLBACK") && !failed -> {
+            is ExecuteResult.TransactionCommitted,
+            is ExecuteResult.TransactionRolledBack -> {
                 inTransaction = false
                 txnFailed = false
             }
-            failed && inTransaction -> {
-                txnFailed = true
-            }
+            else -> {}
         }
+    }
+
+    /**
+     * txnFailed 상태에서 ROLLBACK 명령을 허용하기 위한 판별.
+     *
+     * 세미콜론, 대소문자, 앞뒤 공백을 정규화하여 비교한다.
+     */
+    private fun isRollbackCommand(sql: String): Boolean {
+        val normalized = sql.trim().removeSuffix(";").trim().uppercase()
+        return normalized == "ROLLBACK"
     }
 
     private fun currentTxnStatus(): Char = when {
