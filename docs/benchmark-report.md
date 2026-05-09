@@ -1,6 +1,6 @@
 # Gwanbase 벤치마크 보고서
 
-**측정일**: 2025-05-05  
+**측정일**: 2026-05-05  
 **환경**: macOS (Darwin 25.3.0), JVM 17, Gradle JMH Plugin 0.7.2  
 **설정**: Warmup 2회, Measurement 5회, Fork 1  
 **버퍼 풀 크기**: 1024 프레임 (4MB)
