@@ -43,6 +43,34 @@ data class IndexInfo(
 )
 
 /**
+ * 외래 키 제약 메타데이터. PostgreSQL `pg_constraint`의 `contype = 'f'` 행에 해당한다.
+ * - https://www.postgresql.org/docs/current/catalog-pg-constraint.html
+ *
+ * @param columnName 자식(참조하는) 컬럼
+ * @param refTableName 부모(참조되는) 테이블
+ * @param refColumnName 부모 컬럼. 유일 인덱스가 있어야 한다
+ */
+data class ForeignKeyInfo(
+    val name: String,
+    val tableName: String,
+    val columnName: String,
+    val refTableName: String,
+    val refColumnName: String,
+)
+
+/**
+ * CHECK 제약 메타데이터. PostgreSQL `pg_constraint`의 `contype = 'c'` 행에 해당한다.
+ *
+ * @param exprSql 제약 표현식의 SQL 텍스트. Catalog는 `sql` 패키지에 의존할 수 없으므로 AST 대신
+ *   텍스트로 보관하고 실행기가 재파싱한다 (PostgreSQL은 `conbin`에 노드 트리를 저장한다).
+ */
+data class CheckInfo(
+    val name: String,
+    val tableName: String,
+    val exprSql: String,
+)
+
+/**
  * 테이블/인덱스 메타데이터를 전용 페이지에 영속 저장한다.
  *
  * Catalog 페이지 직렬화 포맷:
@@ -61,6 +89,10 @@ data class IndexInfo(
  *     [nullable: Byte]
  *   }
  * }
+ * (이후 인덱스 섹션, 통계 섹션, 제약 섹션이 이어진다. 각 섹션은 이전 포맷 파일에는 없을 수 있다.)
+ * 제약 섹션:
+ * [fkCount: Int] 반복 { name, tableName, columnName, refTableName, refColumnName — 각 [len: Short][UTF-8] }
+ * [checkCount: Int] 반복 { name, tableName, exprSql — 각 [len: Short][UTF-8] }
  * ```
  */
 class Catalog(
@@ -71,6 +103,8 @@ class Catalog(
     private var nextTableId: Int = 1
     private val indexes = mutableListOf<IndexInfo>()
     private var nextIndexId: Int = 1
+    private val foreignKeys = mutableListOf<ForeignKeyInfo>()
+    private val checks = mutableListOf<CheckInfo>()
     private val rowCounts = mutableMapOf<String, Long>()
     private val columnStatsMap = mutableMapOf<String, MutableMap<String, ColumnStats>>()
 
@@ -113,14 +147,60 @@ class Catalog(
     /** 모든 테이블 목록 */
     fun listTables(): List<TableInfo> = tables.toList()
 
-    /** 테이블을 삭제한다. 해당 테이블에 속한 인덱스도 함께 제거한다. */
+    /** 테이블을 삭제한다. 해당 테이블에 속한 인덱스·제약도 함께 제거한다. */
     fun dropTable(name: String): Boolean {
         val removed = tables.removeAll { it.name == name }
         if (removed) {
             indexes.removeAll { it.tableName == name }
+            foreignKeys.removeAll { it.tableName == name }
+            checks.removeAll { it.tableName == name }
             flush()
         }
         return removed
+    }
+
+    // --- 제약 관리 ---
+
+    /** 외래 키 제약을 등록한다. 제약 이름은 FK/CHECK를 통틀어 유일해야 한다. */
+    fun createForeignKey(
+        name: String,
+        tableName: String,
+        columnName: String,
+        refTableName: String,
+        refColumnName: String,
+    ): ForeignKeyInfo {
+        requireConstraintNameFree(name)
+        val info = ForeignKeyInfo(name, tableName, columnName, refTableName, refColumnName)
+        foreignKeys.add(info)
+        flush()
+        return info
+    }
+
+    /** CHECK 제약을 등록한다. */
+    fun createCheck(name: String, tableName: String, exprSql: String): CheckInfo {
+        requireConstraintNameFree(name)
+        val info = CheckInfo(name, tableName, exprSql)
+        checks.add(info)
+        flush()
+        return info
+    }
+
+    /** 테이블이 가진(자식 쪽) 외래 키 목록 */
+    fun getForeignKeysForTable(tableName: String): List<ForeignKeyInfo> =
+        foreignKeys.filter { it.tableName == tableName }
+
+    /** 테이블을 참조하는(부모 쪽) 외래 키 목록 */
+    fun getForeignKeysReferencing(tableName: String): List<ForeignKeyInfo> =
+        foreignKeys.filter { it.refTableName == tableName }
+
+    /** 테이블의 CHECK 제약 목록 */
+    fun getChecksForTable(tableName: String): List<CheckInfo> =
+        checks.filter { it.tableName == tableName }
+
+    private fun requireConstraintNameFree(name: String) {
+        require(foreignKeys.none { it.name == name } && checks.none { it.name == name }) {
+            "제약 '$name'이 이미 존재한다"
+        }
     }
 
     // --- 인덱스 관리 ---
@@ -221,7 +301,28 @@ class Catalog(
                 size += 8 + 1 + 8 + 8 + 8 // distinctCount, hasMinMax, minValue, maxValue, nullCount
             }
         }
+        // 제약 섹션
+        size += 4 + 4 // fkCount + checkCount
+        for (fk in foreignKeys) {
+            size += listOf(fk.name, fk.tableName, fk.columnName, fk.refTableName, fk.refColumnName)
+                .sumOf { 2 + it.toByteArray(Charsets.UTF_8).size }
+        }
+        for (chk in checks) {
+            size += listOf(chk.name, chk.tableName, chk.exprSql).sumOf { 2 + it.toByteArray(Charsets.UTF_8).size }
+        }
         return size
+    }
+
+    private fun java.nio.ByteBuffer.putString(value: String) {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        putShort(bytes.size.toShort())
+        put(bytes)
+    }
+
+    private fun java.nio.ByteBuffer.getString(): String {
+        val bytes = ByteArray(getShort().toInt() and 0xFFFF)
+        get(bytes)
+        return String(bytes, Charsets.UTF_8)
     }
 
     private fun flush() {
@@ -302,6 +403,17 @@ class Catalog(
                     buf.putLong(if (hasMinMax) (stats.maxValue as Number).toLong() else 0L)
                     buf.putLong(stats.nullCount)
                 }
+            }
+
+            // 제약 섹션
+            buf.putInt(foreignKeys.size)
+            for (fk in foreignKeys) {
+                listOf(fk.name, fk.tableName, fk.columnName, fk.refTableName, fk.refColumnName)
+                    .forEach { buf.putString(it) }
+            }
+            buf.putInt(checks.size)
+            for (chk in checks) {
+                listOf(chk.name, chk.tableName, chk.exprSql).forEach { buf.putString(it) }
             }
         } finally {
             bpm.unpinPage(catalogPageId, isDirty = true)
@@ -407,6 +519,20 @@ class Catalog(
                         colStats[colName] = ColumnStats(distinctCount, minValue, maxValue, nullCount)
                     }
                     columnStatsMap[tblName] = colStats
+                }
+            }
+
+            // 제약 섹션 (하위 호환: 이전 포맷에는 없을 수 있음)
+            foreignKeys.clear()
+            checks.clear()
+            if (buf.remaining() >= 8) {
+                repeat(buf.getInt()) {
+                    foreignKeys.add(
+                        ForeignKeyInfo(buf.getString(), buf.getString(), buf.getString(), buf.getString(), buf.getString())
+                    )
+                }
+                repeat(buf.getInt()) {
+                    checks.add(CheckInfo(buf.getString(), buf.getString(), buf.getString()))
                 }
             }
         } finally {
