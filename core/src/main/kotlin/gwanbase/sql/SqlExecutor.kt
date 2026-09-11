@@ -159,7 +159,7 @@ class SqlExecutor(
         for ((i, colName) in stmt.columns.withIndex()) {
             val colIndex = schema.columnIndex(colName)
             val rawValue = evaluateLiteral(stmt.values[i])
-            valuesArray[colIndex] = coerceValue(rawValue, schema.column(colIndex).type)
+            valuesArray[colIndex] = coerceValue(rawValue, schema.column(colIndex))
         }
 
         val tuple = Tuple(schema, valuesArray)
@@ -236,7 +236,7 @@ class SqlExecutor(
             for (assignment in stmt.assignments) {
                 val colIndex = schema.columnIndex(assignment.column)
                 val rawValue = ExpressionEvaluator.evaluate(schema, freshTuple, assignment.value)
-                newValues[colIndex] = coerceValue(rawValue, schema.column(colIndex).type)
+                newValues[colIndex] = coerceValue(rawValue, schema.column(colIndex))
             }
             val newTuple = Tuple(schema, newValues)
             if (session != null) {
@@ -308,13 +308,20 @@ class SqlExecutor(
     }
 
     /**
-     * 값을 대상 데이터 타입에 맞게 변환한다.
+     * 값을 대상 컬럼 타입에 맞게 변환한다.
+     *
+     * 타입 범위를 벗어나는 값은 DataException(Class 22)으로 거부한다.
      */
-    private fun coerceValue(value: Any?, targetType: DataType): Any? {
+    private fun coerceValue(value: Any?, column: Column): Any? {
         if (value == null) return null
-        return when (targetType) {
+        return when (column.type) {
             DataType.INT32 -> when (value) {
-                is Long -> value.toInt()
+                is Long -> {
+                    if (value !in Int.MIN_VALUE..Int.MAX_VALUE) {
+                        throw DataException("INT 범위 초과: $value", "22003")
+                    }
+                    value.toInt()
+                }
                 is Int -> value
                 else -> value
             }
@@ -333,6 +340,12 @@ class SqlExecutor(
                 is Int -> value.toLong()
                 is Long -> value
                 else -> value
+            }
+            DataType.VARCHAR -> {
+                if (value is String && column.maxLength > 0 && value.length > column.maxLength) {
+                    throw DataException("VARCHAR(${column.maxLength}) 길이 초과: ${value.length}자", "22001")
+                }
+                value
             }
             else -> value
         }

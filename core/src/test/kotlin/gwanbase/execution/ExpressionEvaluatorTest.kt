@@ -3,6 +3,7 @@ package gwanbase.execution
 import gwanbase.sql.*
 import gwanbase.table.*
 import io.kotest.matchers.shouldBe
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.Test
 
 class ExpressionEvaluatorTest {
@@ -285,5 +286,35 @@ class ExpressionEvaluatorTest {
             Expression.IntLiteral(90),
         )
         ExpressionEvaluator.evaluateCondition(schema, nullTuple, expr) shouldBe false
+    }
+
+    // ── 데이터 예외 (SQLSTATE Class 22) ──
+
+    @Test
+    fun `정수 0으로 나누면 division_by_zero 22012`() {
+        val expr = Expression.BinaryOp(Expression.IntLiteral(1), BinaryOperator.DIV, Expression.IntLiteral(0))
+        val e = assertThrows<DataException> { ExpressionEvaluator.evaluate(schema, tuple, expr) }
+        e.sqlState shouldBe "22012"
+    }
+
+    @Test
+    fun `실수 0으로 나누면 division_by_zero 22012`() {
+        val expr = Expression.BinaryOp(Expression.FloatLiteral(1.0), BinaryOperator.DIV, Expression.IntLiteral(0))
+        val e = assertThrows<DataException> { ExpressionEvaluator.evaluate(schema, tuple, expr) }
+        e.sqlState shouldBe "22012"
+    }
+
+    @Test
+    fun `정수 덧셈 오버플로 시 numeric_value_out_of_range 22003`() {
+        val expr = Expression.BinaryOp(Expression.IntLiteral(Long.MAX_VALUE), BinaryOperator.ADD, Expression.IntLiteral(1))
+        val e = assertThrows<DataException> { ExpressionEvaluator.evaluate(schema, tuple, expr) }
+        e.sqlState shouldBe "22003"
+    }
+
+    @Test
+    fun `정수 곱셈 오버플로 시 numeric_value_out_of_range 22003`() {
+        val expr = Expression.BinaryOp(Expression.IntLiteral(Long.MAX_VALUE), BinaryOperator.MUL, Expression.IntLiteral(2))
+        val e = assertThrows<DataException> { ExpressionEvaluator.evaluate(schema, tuple, expr) }
+        e.sqlState shouldBe "22003"
     }
 }

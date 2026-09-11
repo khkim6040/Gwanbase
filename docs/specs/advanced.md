@@ -240,6 +240,7 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 | `ParseException` | 42601 | syntax_error |
 | `BindException` | 42000 | syntax_error_or_access_rule_violation (세분화 전 임시) |
 | `DeadlockException` | 40P01 | deadlock_detected |
+| `DataException` | 필드값 (22xxx) | data_exception — 코드를 필드로 보유 |
 | 그 외 | XX000 | internal_error |
 | (트랜잭션 실패 상태) | 25P02 | in_failed_sql_transaction — 기존 구현 |
 
@@ -248,15 +249,18 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
   현재 Binder가 NOT NULL 검사까지 담당하므로 제약 위반과 문법 오류가 한 타입에 섞여 있다.
 - PostgreSQL: `src/backend/utils/errcodes.txt`, `ereport(ERROR, errcode(...))`
 
-### 18. 데이터 예외 (Class 22)
+### 18. 데이터 예외 (Class 22) ✅
 
-| SQLSTATE | 에러 | 재현 |
-|----------|------|------|
-| 22001 | string_data_right_truncation | `VARCHAR(n)` 길이 초과 INSERT |
-| 22012 | division_by_zero | `SELECT x / 0` |
-| 22003 | numeric_value_out_of_range | INT 오버플로 |
+| SQLSTATE | 에러 | 재현 | 검사 위치 |
+|----------|------|------|-----------|
+| 22001 | string_data_right_truncation | `VARCHAR(n)` 길이 초과 INSERT/UPDATE | `SqlExecutor.coerceValue` |
+| 22012 | division_by_zero | `SELECT x / 0` (정수·실수 모두) | `ExpressionEvaluator.numericOp` |
+| 22003 | numeric_value_out_of_range | INT64 산술 오버플로, INT32 범위 초과 저장 | `numericOp` (`Math.*Exact`), `coerceValue` |
 
-- `ExpressionEvaluator`·`SqlExecutor`에 검사 한 곳씩 추가하는 수준.
+- `DataException(message, sqlState)` 단일 타입에 코드를 실어 보낸다.
+  PostgreSQL이 `ereport(ERROR, errcode(...))`로 코드를 값으로 다루는 방식과 같다.
+- `VARCHAR(n)`의 n은 PostgreSQL과 동일하게 **문자 수** 기준이다 (바이트 아님).
+- 실수 `/ 0`은 IEEE Infinity 대신 에러 — PostgreSQL float8 동작과 일치.
 
 ### 19. 락 타임아웃 (55P03)
 
@@ -326,7 +330,7 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 | 순위 | 항목 | 이유 |
 |------|------|------|
 | 1 | SQLSTATE 매핑 ✅ | 이후 모든 에러의 전달 경로 |
-| 2 | 데이터 예외 | 검사 한 곳씩, 낮은 비용 |
+| 2 | 데이터 예외 ✅ | 검사 한 곳씩, 낮은 비용 |
 | 3 | 락 타임아웃 | 무한 대기 제거, 운영 안정성 |
 | 4 | UNIQUE / PK | 중복 키 에러 — 실무에서 가장 빈번한 재시도 대상 |
 | 5 | FK / CHECK | UNIQUE 위에 구축 |

@@ -1,6 +1,7 @@
 package gwanbase.server
 
 import gwanbase.sql.BindException
+import gwanbase.sql.DataException
 import gwanbase.sql.ExecuteResult
 import gwanbase.sql.ParseException
 import gwanbase.table.Database
@@ -165,6 +166,7 @@ class ConnectionHandler(
             is ParseException -> "42601"    // syntax_error
             is BindException -> "42000"     // syntax_error_or_access_rule_violation
             is DeadlockException -> "40P01" // deadlock_detected
+            is DataException -> e.sqlState  // Class 22: data_exception
             else -> "XX000"                 // internal_error
         }
     }
