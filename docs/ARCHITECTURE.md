@@ -75,6 +75,7 @@ ConnectionHandler (P8)     Simple Query 메시지 수신 → 세션에 위임, �
 | `DeadlockException` | 40P01 | LockManager |
 | `LockTimeoutException` | 55P03 | LockManager |
 | `UniqueViolationException` | 23505 | Database.checkUniqueConstraints |
+| `ConstraintViolationException` | 23503 / 23514 (필드) | SqlExecutor.rowConstraintChecker, checkNoReferencingRows |
 | 그 외 | XX000 | — |
 
 상세는 `docs/specs/advanced.md`의 "Constraints & Error Semantics" 참조.
