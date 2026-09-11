@@ -4,6 +4,7 @@ import gwanbase.sql.*
 import gwanbase.table.Database
 import gwanbase.table.RID
 import gwanbase.table.Tuple
+import gwanbase.table.UniqueViolationException
 import gwanbase.wal.LogRecord
 import gwanbase.wal.TransactionContext
 
@@ -109,11 +110,31 @@ class DatabaseSession(
 
     /** INSERT 시 삽입된 행에 X 잠금을 획득하는 래퍼. */
     internal fun insertTupleWithLock(tableName: String, tuple: Tuple): RID {
-        val rid = database.insertTuple(tableName, tuple)
+        val rid = waitForConflictingRow(tableName) { database.insertTuple(tableName, tuple) }
         currentTxn?.let { txn ->
             lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE, lockTimeoutMillis)
         }
         return rid
+    }
+
+    /**
+     * 유일 제약 위반 시 충돌 행의 잠금을 기다린 뒤 한 번 재시도한다.
+     *
+     * 충돌 행이 다른 트랜잭션의 미커밋 삽입이라면 그 행에는 X 잠금이 걸려 있으므로,
+     * S 잠금 요청은 상대가 commit/abort할 때까지 블록된다. 상대가 abort하면 행이 사라져
+     * 재시도가 성공하고, commit하면 재시도에서 다시 위반이 발생해 그대로 전파된다.
+     * PostgreSQL `_bt_check_unique()`가 `XactLockTableWait()`로 삽입 트랜잭션의 종료를
+     * 기다리는 것과 같은 의미다. 충돌 행을 자기 자신이 잠그고 있으면 S 잠금이 즉시 반환되어
+     * 재시도가 곧바로 다시 실패한다.
+     */
+    private fun <T> waitForConflictingRow(tableName: String, action: () -> T): T {
+        return try {
+            action()
+        } catch (e: UniqueViolationException) {
+            val txn = currentTxn ?: throw e
+            lockManager.acquire(txn.txnId, LockTarget(tableName, e.conflictingRid), LockMode.SHARED, lockTimeoutMillis)
+            action()
+        }
     }
 
     /** DELETE 시 대상 행에 X 잠금을 획득하는 래퍼. */
@@ -148,7 +169,7 @@ class DatabaseSession(
 
     /** 이미 X 잠금을 보유한 상태에서 튜플을 업데이트한다. WAL 로깅은 정상적으로 수행된다. */
     internal fun updateTupleWithLockAlreadyHeld(tableName: String, rid: RID, tuple: Tuple): RID {
-        return database.updateTuple(tableName, rid, tuple)
+        return waitForConflictingRow(tableName) { database.updateTuple(tableName, rid, tuple) }
     }
 
     override fun close() {

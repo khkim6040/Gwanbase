@@ -3,10 +3,12 @@ package gwanbase.txn
 import gwanbase.sql.ExecuteResult
 import gwanbase.table.Database
 import gwanbase.table.RID
+import gwanbase.table.UniqueViolationException
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
@@ -215,5 +217,89 @@ class ConcurrencyIntegrationTest {
         val result = db.executeSql("SELECT * FROM t WHERE id = 1") as ExecuteResult.Selected
         // 직렬화 보장: 100+10+20=130 또는 100+20+10=130
         result.rows[0][1] shouldBe 130
+    }
+
+    // ── UNIQUE 제약과 동시성 ──
+
+    private fun setUpUniqueTable() {
+        db.executeSql("CREATE TABLE u (id INT PRIMARY KEY)")
+    }
+
+    @Test
+    fun `같은 트랜잭션 내 중복 삽입은 즉시 UniqueViolationException`() {
+        setUpUniqueTable()
+        db.createSession().use { s ->
+            s.executeSql("BEGIN")
+            s.executeSql("INSERT INTO u (id) VALUES (1)")
+            assertThrows<UniqueViolationException> {
+                s.executeSql("INSERT INTO u (id) VALUES (1)")
+            }
+        }
+    }
+
+    @Test
+    fun `미커밋 중복 키 삽입은 상대 트랜잭션이 ROLLBACK하면 성공한다`() {
+        setUpUniqueTable()
+        val s1Inserted = CountDownLatch(1)
+        val s2Result = AtomicReference<Throwable?>(null)
+        val s2Started = CountDownLatch(1)
+
+        val t1 = Thread {
+            db.createSession().use { s1 ->
+                s1.executeSql("BEGIN")
+                s1.executeSql("INSERT INTO u (id) VALUES (1)")
+                s1Inserted.countDown()
+                s2Started.await()
+                Thread.sleep(100) // s2가 대기 큐에 들어갈 시간
+                s1.executeSql("ROLLBACK")
+            }
+        }
+        val t2 = Thread {
+            s1Inserted.await()
+            s2Started.countDown()
+            try {
+                db.executeSql("INSERT INTO u (id) VALUES (1)")
+            } catch (e: Throwable) {
+                s2Result.set(e)
+            }
+        }
+        t1.start(); t2.start()
+        t1.join(5000); t2.join(5000)
+
+        s2Result.get() shouldBe null
+        (db.executeSql("SELECT * FROM u") as ExecuteResult.Selected).rows.size shouldBe 1
+    }
+
+    @Test
+    fun `미커밋 중복 키 삽입은 상대 트랜잭션이 COMMIT하면 UniqueViolationException`() {
+        setUpUniqueTable()
+        val s1Inserted = CountDownLatch(1)
+        val s2Result = AtomicReference<Throwable?>(null)
+        val s2Started = CountDownLatch(1)
+
+        val t1 = Thread {
+            db.createSession().use { s1 ->
+                s1.executeSql("BEGIN")
+                s1.executeSql("INSERT INTO u (id) VALUES (1)")
+                s1Inserted.countDown()
+                s2Started.await()
+                Thread.sleep(100)
+                s1.executeSql("COMMIT")
+            }
+        }
+        val t2 = Thread {
+            s1Inserted.await()
+            s2Started.countDown()
+            try {
+                db.executeSql("INSERT INTO u (id) VALUES (1)")
+            } catch (e: Throwable) {
+                s2Result.set(e)
+            }
+        }
+        t1.start(); t2.start()
+        t1.join(5000); t2.join(5000)
+
+        (s2Result.get() is UniqueViolationException) shouldBe true
+        (db.executeSql("SELECT * FROM u") as ExecuteResult.Selected).rows.size shouldBe 1
     }
 }
