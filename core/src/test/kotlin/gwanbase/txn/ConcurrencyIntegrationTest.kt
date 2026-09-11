@@ -1,6 +1,7 @@
 package gwanbase.txn
 
 import gwanbase.sql.ExecuteResult
+import gwanbase.table.ConstraintViolationException
 import gwanbase.table.Database
 import gwanbase.table.RID
 import gwanbase.table.UniqueViolationException
@@ -301,5 +302,57 @@ class ConcurrencyIntegrationTest {
 
         (s2Result.get() is UniqueViolationException) shouldBe true
         (db.executeSql("SELECT * FROM u") as ExecuteResult.Selected).rows.size shouldBe 1
+    }
+
+    // ── 외래 키와 잠금 연동 ──
+
+    private fun setUpParentChild() {
+        db.executeSql("CREATE TABLE users (id INT PRIMARY KEY)")
+        db.executeSql("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT REFERENCES users(id))")
+        db.executeSql("INSERT INTO users (id) VALUES (1)")
+    }
+
+    /** s1이 자식을 미커밋 삽입한 상태에서 s2가 부모를 삭제하려 하면 s1 종료까지 대기한다. */
+    private fun runParentDeleteAgainstUncommittedChild(s1Ending: String): Throwable? {
+        setUpParentChild()
+        val s1Inserted = CountDownLatch(1)
+        val s2Started = CountDownLatch(1)
+        val s2Result = AtomicReference<Throwable?>(null)
+
+        val t1 = Thread {
+            db.createSession().use { s1 ->
+                s1.executeSql("BEGIN")
+                s1.executeSql("INSERT INTO orders (id, user_id) VALUES (10, 1)")
+                s1Inserted.countDown()
+                s2Started.await()
+                Thread.sleep(100) // s2가 부모 행 X 잠금 대기 큐에 들어갈 시간
+                s1.executeSql(s1Ending)
+            }
+        }
+        val t2 = Thread {
+            s1Inserted.await()
+            s2Started.countDown()
+            try {
+                db.executeSql("DELETE FROM users WHERE id = 1")
+            } catch (e: Throwable) {
+                s2Result.set(e)
+            }
+        }
+        t1.start(); t2.start()
+        t1.join(5000); t2.join(5000)
+        return s2Result.get()
+    }
+
+    @Test
+    fun `미커밋 자식 삽입이 COMMIT되면 대기하던 부모 DELETE는 ConstraintViolationException`() {
+        val result = runParentDeleteAgainstUncommittedChild("COMMIT")
+        (result is ConstraintViolationException) shouldBe true
+        (db.executeSql("SELECT * FROM users") as ExecuteResult.Selected).rows.size shouldBe 1
+    }
+
+    @Test
+    fun `미커밋 자식 삽입이 ROLLBACK되면 대기하던 부모 DELETE는 성공한다`() {
+        runParentDeleteAgainstUncommittedChild("ROLLBACK") shouldBe null
+        (db.executeSql("SELECT * FROM users") as ExecuteResult.Selected).rows.size shouldBe 0
     }
 }

@@ -30,6 +30,17 @@ class Parser(private val tokens: List<Token>) {
         return stmt
     }
 
+    /**
+     * 토큰 전체를 하나의 표현식으로 파싱한다. Catalog에 텍스트로 저장된 CHECK 제약을 되살릴 때 쓴다.
+     *
+     * @throws ParseException 표현식 뒤에 토큰이 남아 있을 때
+     */
+    fun parseStandaloneExpression(): Expression {
+        val expr = parseExpression(0)
+        expect(TokenType.EOF, "표현식 끝에 예상하지 못한 토큰이 있다")
+        return expr
+    }
+
     // ── 문(statement) 파싱 ──
 
     private fun parseStatement(): Statement {

@@ -94,6 +94,138 @@ class SqlExecutorTest {
         database.getCatalog().getIndex("users_pkey").shouldNotBeNull()
     }
 
+    // ── 1b. CHECK 제약 ──
+
+    @Test
+    fun `CHECK 위반 시 ConstraintViolationException 23514`() {
+        executor.execute("CREATE TABLE t (id INT, age INT CHECK (age >= 0))")
+        val e = assertThrows<ConstraintViolationException> {
+            executor.execute("INSERT INTO t (id, age) VALUES (1, -1)")
+        }
+        e.sqlState shouldBe "23514"
+        e.constraintName shouldBe "t_age_check"
+        e.message shouldBe "new row for relation \"t\" violates check constraint \"t_age_check\""
+        (executor.execute("SELECT * FROM t") as ExecuteResult.Selected).rows.size shouldBe 0
+    }
+
+    @Test
+    fun `CHECK 결과가 NULL이면 통과한다`() {
+        executor.execute("CREATE TABLE t (id INT, age INT CHECK (age >= 0))")
+        executor.execute("INSERT INTO t (id, age) VALUES (1, NULL)")
+        (executor.execute("SELECT * FROM t") as ExecuteResult.Selected).rows.size shouldBe 1
+    }
+
+    @Test
+    fun `CHECK는 같은 테이블의 다른 컬럼을 참조할 수 있고 UPDATE에도 적용된다`() {
+        executor.execute("CREATE TABLE r (lo INT, hi INT CHECK (lo < hi))")
+        executor.execute("INSERT INTO r (lo, hi) VALUES (1, 10)")
+        assertThrows<ConstraintViolationException> {
+            executor.execute("UPDATE r SET lo = 20 WHERE hi = 10")
+        }
+        (executor.execute("SELECT lo FROM r") as ExecuteResult.Selected).rows[0][0] shouldBe 1
+    }
+
+    @Test
+    fun `CHECK 제약은 DB 재오픈 후에도 유지된다`() {
+        executor.execute("CREATE TABLE t (id INT, age INT CHECK (age >= 0 AND age < 200))")
+        database.close()
+        database = Database.open(tempDir.resolve("test.db"))
+        executor = SqlExecutor(database)
+        assertThrows<ConstraintViolationException> {
+            executor.execute("INSERT INTO t (id, age) VALUES (1, 300)")
+        }
+        executor.execute("INSERT INTO t (id, age) VALUES (1, 30)")
+    }
+
+    // ── 1c. FOREIGN KEY 제약 ──
+
+    private fun setUpParentChild() {
+        executor.execute("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50))")
+        executor.execute("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT REFERENCES users(id))")
+        executor.execute("INSERT INTO users (id, name) VALUES (1, 'a')")
+    }
+
+    @Test
+    fun `부모 행이 없는 자식 INSERT 시 ConstraintViolationException 23503`() {
+        setUpParentChild()
+        val e = assertThrows<ConstraintViolationException> {
+            executor.execute("INSERT INTO orders (id, user_id) VALUES (10, 999)")
+        }
+        e.sqlState shouldBe "23503"
+        e.constraintName shouldBe "orders_user_id_fkey"
+        e.message shouldBe "insert or update on table \"orders\" violates foreign key constraint \"orders_user_id_fkey\""
+        (executor.execute("SELECT * FROM orders") as ExecuteResult.Selected).rows.size shouldBe 0
+    }
+
+    @Test
+    fun `부모 행이 있거나 FK 값이 NULL이면 자식 INSERT 성공`() {
+        setUpParentChild()
+        executor.execute("INSERT INTO orders (id, user_id) VALUES (10, 1)")
+        executor.execute("INSERT INTO orders (id, user_id) VALUES (11, NULL)")
+        (executor.execute("SELECT * FROM orders") as ExecuteResult.Selected).rows.size shouldBe 2
+    }
+
+    @Test
+    fun `자식 UPDATE로 없는 부모를 참조하면 23503`() {
+        setUpParentChild()
+        executor.execute("INSERT INTO orders (id, user_id) VALUES (10, 1)")
+        assertThrows<ConstraintViolationException> {
+            executor.execute("UPDATE orders SET user_id = 999 WHERE id = 10")
+        }
+    }
+
+    @Test
+    fun `자식이 참조하는 부모 DELETE 시 23503`() {
+        setUpParentChild()
+        executor.execute("INSERT INTO users (id, name) VALUES (2, 'b')")
+        executor.execute("INSERT INTO orders (id, user_id) VALUES (10, 1)")
+        val e = assertThrows<ConstraintViolationException> {
+            executor.execute("DELETE FROM users WHERE id = 1")
+        }
+        e.sqlState shouldBe "23503"
+        e.message shouldBe "update or delete on table \"users\" violates foreign key constraint \"orders_user_id_fkey\" on table \"orders\""
+        (executor.execute("SELECT * FROM users") as ExecuteResult.Selected).rows.size shouldBe 2
+        executor.execute("DELETE FROM users WHERE id = 2") shouldBe ExecuteResult.Deleted(1)
+    }
+
+    @Test
+    fun `자식 행을 지운 뒤에는 부모 DELETE 성공`() {
+        setUpParentChild()
+        executor.execute("INSERT INTO orders (id, user_id) VALUES (10, 1)")
+        executor.execute("DELETE FROM orders WHERE id = 10")
+        executor.execute("DELETE FROM users WHERE id = 1") shouldBe ExecuteResult.Deleted(1)
+    }
+
+    @Test
+    fun `자식이 참조하는 부모 키 UPDATE 시 23503, 같은 값이면 통과`() {
+        setUpParentChild()
+        executor.execute("INSERT INTO orders (id, user_id) VALUES (10, 1)")
+        assertThrows<ConstraintViolationException> {
+            executor.execute("UPDATE users SET id = 2 WHERE id = 1")
+        }
+        executor.execute("UPDATE users SET id = 1, name = 'z' WHERE id = 1") shouldBe ExecuteResult.Updated(1)
+    }
+
+    @Test
+    fun `REFERENCES에 컬럼을 생략하면 부모 PRIMARY KEY를 참조한다`() {
+        executor.execute("CREATE TABLE users (id INT PRIMARY KEY)")
+        executor.execute("CREATE TABLE orders (id INT, user_id INT REFERENCES users)")
+        database.getCatalog().getForeignKeysForTable("orders")[0].refColumnName shouldBe "id"
+        assertThrows<ConstraintViolationException> {
+            executor.execute("INSERT INTO orders (id, user_id) VALUES (1, 5)")
+        }
+    }
+
+    @Test
+    fun `자식 컬럼에 인덱스가 있어도 부모 DELETE 검사가 동작한다`() {
+        setUpParentChild()
+        executor.execute("CREATE INDEX orders_user_idx ON orders (user_id)")
+        executor.execute("INSERT INTO orders (id, user_id) VALUES (10, 1)")
+        assertThrows<ConstraintViolationException> {
+            executor.execute("DELETE FROM users WHERE id = 1")
+        }
+    }
+
     // ── 2. DROP TABLE ──
 
     @Test
