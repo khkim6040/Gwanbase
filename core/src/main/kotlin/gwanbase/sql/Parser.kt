@@ -30,6 +30,17 @@ class Parser(private val tokens: List<Token>) {
         return stmt
     }
 
+    /**
+     * 토큰 전체를 하나의 표현식으로 파싱한다. Catalog에 텍스트로 저장된 CHECK 제약을 되살릴 때 쓴다.
+     *
+     * @throws ParseException 표현식 뒤에 토큰이 남아 있을 때
+     */
+    fun parseStandaloneExpression(): Expression {
+        val expr = parseExpression(0)
+        expect(TokenType.EOF, "표현식 끝에 예상하지 못한 토큰이 있다")
+        return expr
+    }
+
     // ── 문(statement) 파싱 ──
 
     private fun parseStatement(): Statement {
@@ -91,7 +102,7 @@ class Parser(private val tokens: List<Token>) {
     /**
      * 컬럼 정의를 파싱한다.
      *
-     * 문법: name datatype { NOT NULL | UNIQUE | PRIMARY KEY }*
+     * 문법: name datatype { NOT NULL | UNIQUE | PRIMARY KEY | REFERENCES table [(column)] | CHECK (expr) }*
      *
      * 컬럼 제약은 순서 무관하게 반복될 수 있다 (PostgreSQL `column_constraint`와 동일).
      * - https://www.postgresql.org/docs/current/sql-createtable.html
@@ -102,8 +113,27 @@ class Parser(private val tokens: List<Token>) {
         var nullable = true
         var unique = false
         var primaryKey = false
+        var references: ForeignKeyRef? = null
+        var check: Expression? = null
         while (true) {
             when (peek().type) {
+                TokenType.REFERENCES -> {
+                    advance()
+                    val refTable = expectIdentifier("REFERENCES 뒤에 테이블 이름이 필요하다")
+                    var refColumn: String? = null
+                    if (peek().type == TokenType.LPAREN) {
+                        advance()
+                        refColumn = expectIdentifier("참조 컬럼 이름이 필요하다")
+                        expect(TokenType.RPAREN, "')' 가 필요하다")
+                    }
+                    references = ForeignKeyRef(refTable, refColumn)
+                }
+                TokenType.CHECK -> {
+                    advance()
+                    expect(TokenType.LPAREN, "CHECK 뒤에 '(' 가 필요하다")
+                    check = parseExpression(0)
+                    expect(TokenType.RPAREN, "')' 가 필요하다")
+                }
                 TokenType.NOT -> {
                     advance() // NOT 소비
                     expect(TokenType.NULL, "NOT 뒤에 NULL이 필요하다")
@@ -122,7 +152,7 @@ class Parser(private val tokens: List<Token>) {
                 else -> break
             }
         }
-        return ColumnDef(name, dataType, nullable, unique, primaryKey)
+        return ColumnDef(name, dataType, nullable, unique, primaryKey, references, check)
     }
 
     /**

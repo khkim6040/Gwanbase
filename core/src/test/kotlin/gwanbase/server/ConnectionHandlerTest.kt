@@ -5,6 +5,7 @@ import gwanbase.sql.DataException
 import gwanbase.sql.ParseException
 import gwanbase.table.Database
 import gwanbase.table.RID
+import gwanbase.table.ConstraintViolationException
 import gwanbase.table.UniqueViolationException
 import gwanbase.txn.DeadlockException
 import gwanbase.txn.LockTimeoutException
@@ -196,6 +197,8 @@ class ConnectionHandlerTest {
         ConnectionHandler.sqlStateOf(DataException("x", "22012")) shouldBe "22012"
         ConnectionHandler.sqlStateOf(LockTimeoutException(1, 100)) shouldBe "55P03"
         ConnectionHandler.sqlStateOf(UniqueViolationException("t_pkey", RID(0, 0))) shouldBe "23505"
+        ConnectionHandler.sqlStateOf(ConstraintViolationException("c", "23503", "x")) shouldBe "23503"
+        ConnectionHandler.sqlStateOf(ConstraintViolationException("c", "23514", "x")) shouldBe "23514"
         ConnectionHandler.sqlStateOf(IllegalStateException("x")) shouldBe "XX000"
     }
 

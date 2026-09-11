@@ -88,6 +88,9 @@ sealed class FromClause {
  * 컬럼 정의 (CREATE TABLE에서 사용).
  *
  * PRIMARY KEY는 NOT NULL + UNIQUE를 함축하므로 [primaryKey]가 true면 [nullable]은 false다.
+ *
+ * @param references `REFERENCES table(column)` 외래 키 제약. 없으면 null
+ * @param check `CHECK (expr)` 제약 표현식. 없으면 null
  */
 data class ColumnDef(
     val name: String,
@@ -95,7 +98,17 @@ data class ColumnDef(
     val nullable: Boolean = true,
     val unique: Boolean = false,
     val primaryKey: Boolean = false,
+    val references: ForeignKeyRef? = null,
+    val check: Expression? = null,
 )
+
+/**
+ * 외래 키가 참조하는 대상.
+ *
+ * @param column 참조 컬럼. 생략(`REFERENCES t`)하면 null이며 부모 테이블의 PRIMARY KEY를 뜻한다.
+ *   https://www.postgresql.org/docs/current/sql-createtable.html (`REFERENCES reftable [ ( refcolumn ) ]`)
+ */
+data class ForeignKeyRef(val table: String, val column: String?)
 
 /**
  * SQL 데이터 타입.
@@ -118,6 +131,16 @@ sealed class SqlDataType {
 
     /** 가변 길이 문자열 타입. */
     data class VarcharType(val maxLength: Int) : SqlDataType()
+
+    /** 스토리지 데이터 타입으로 변환한다. */
+    fun toDataType(): gwanbase.table.DataType = when (this) {
+        is BooleanType -> gwanbase.table.DataType.BOOLEAN
+        is IntType -> gwanbase.table.DataType.INT32
+        is BigIntType -> gwanbase.table.DataType.INT64
+        is DoubleType -> gwanbase.table.DataType.FLOAT64
+        is TimestampType -> gwanbase.table.DataType.TIMESTAMP
+        is VarcharType -> gwanbase.table.DataType.VARCHAR
+    }
 }
 
 /**
@@ -181,20 +204,41 @@ sealed class Expression {
 
     /** IS NOT NULL 검사. */
     data class IsNotNull(val expr: Expression) : Expression()
+
+    /**
+     * 표현식을 다시 파싱 가능한 SQL 텍스트로 변환한다.
+     *
+     * 우선순위를 따지지 않고 복합 표현식마다 괄호를 붙인다. Catalog에 CHECK 제약을 저장할 때 쓴다.
+     * PostgreSQL은 `pg_constraint.conbin`에 노드 트리를 저장하고 `pg_get_constraintdef()`로
+     * 역직렬화(deparse)하지만, 여기서는 텍스트 저장 후 재파싱하는 쪽이 훨씬 단순하다.
+     * - https://www.postgresql.org/docs/current/catalog-pg-constraint.html
+     */
+    fun toSql(): String = when (this) {
+        is IntLiteral -> value.toString()
+        is FloatLiteral -> value.toString()
+        is StringLiteral -> "'" + value.replace("'", "''") + "'"
+        is BoolLiteral -> if (value) "TRUE" else "FALSE"
+        is NullLiteral -> "NULL"
+        is ColumnRef -> if (table != null) "$table.$name" else name
+        is BinaryOp -> "(${left.toSql()} ${op.sql} ${right.toSql()})"
+        is UnaryOp -> "(${op.sql}${operand.toSql()})"
+        is IsNull -> "(${expr.toSql()} IS NULL)"
+        is IsNotNull -> "(${expr.toSql()} IS NOT NULL)"
+    }
 }
 
 /**
  * 이항 연산자.
  */
-enum class BinaryOperator {
-    ADD, SUB, MUL, DIV,
-    EQ, NEQ, LT, GT, LTE, GTE,
-    AND, OR,
+enum class BinaryOperator(val sql: String) {
+    ADD("+"), SUB("-"), MUL("*"), DIV("/"),
+    EQ("="), NEQ("<>"), LT("<"), GT(">"), LTE("<="), GTE(">="),
+    AND("AND"), OR("OR"),
 }
 
 /**
  * 단항 연산자.
  */
-enum class UnaryOperator {
-    NEGATE, NOT,
+enum class UnaryOperator(val sql: String) {
+    NEGATE("-"), NOT("NOT "),
 }

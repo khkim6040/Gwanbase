@@ -1,6 +1,7 @@
 package gwanbase.sql
 
 import gwanbase.table.Catalog
+import gwanbase.table.Column
 import gwanbase.table.Schema
 
 /**
@@ -28,21 +29,64 @@ class Binder(private val catalog: Catalog) {
             is Statement.Commit -> { /* 검증 불필요 */ }
             is Statement.Rollback -> { /* 검증 불필요 */ }
             is Statement.CreateIndex -> bindCreateIndex(statement)
-            is Statement.DropIndex -> { /* 런타임 검증 */ }
+            is Statement.DropIndex -> bindDropIndex(statement)
             is Statement.Analyze -> bindAnalyze(statement)
             is Statement.Explain -> bind(statement.statement)
         }
         return statement
     }
 
+    /**
+     * CREATE TABLE 문을 바인딩한다. CHECK 표현식의 컬럼 참조와 REFERENCES 대상을 검증한다.
+     *
+     * 외래 키가 참조하는 컬럼에는 유일 인덱스가 있어야 하고 타입이 같아야 한다. PostgreSQL의
+     * `transformFkeyCheckAttrs()`가 참조 컬럼을 덮는 유일 인덱스를 찾는 것과 같다.
+     * - https://github.com/postgres/postgres/blob/master/src/backend/commands/tablecmds.c
+     * 참조 컬럼을 생략하면 부모의 PRIMARY KEY(`{table}_pkey` 인덱스)를 참조한다.
+     * 자기 자신을 참조하는 외래 키는 아직 지원하지 않는다 (테이블이 생성되기 전이라 조회 불가).
+     */
     private fun bindCreateTable(stmt: Statement.CreateTable) {
         if (catalog.getTable(stmt.tableName) != null) {
             throw BindException("테이블 '${stmt.tableName}'이 이미 존재한다")
         }
+        val newSchema = Schema(stmt.columns.map { Column(it.name, it.dataType.toDataType()) })
+        for (colDef in stmt.columns) {
+            colDef.check?.let { validateExpression(newSchema, it) }
+            val ref = colDef.references ?: continue
+            val refSchema = requireTable(ref.table)
+            val refColumn = ref.column
+                ?: catalog.getIndex("${ref.table}_pkey")?.columnName
+                ?: throw BindException("테이블 '${ref.table}'에 PRIMARY KEY가 없어 참조 컬럼을 생략할 수 없다")
+            requireColumn(refSchema, refColumn)
+            if (catalog.getIndexesForTable(ref.table).none { it.unique && it.columnName == refColumn }) {
+                throw BindException("참조 컬럼 '${ref.table}.$refColumn'에 유일 제약이 없다")
+            }
+            val refType = refSchema.column(refSchema.columnIndex(refColumn)).type
+            if (refType != colDef.dataType.toDataType()) {
+                throw BindException("외래 키 컬럼 '${colDef.name}'과 참조 컬럼 '${ref.table}.$refColumn'의 타입이 다르다")
+            }
+        }
     }
 
+    /**
+     * DROP TABLE 문을 바인딩한다. 다른 테이블의 외래 키가 참조하는 테이블은 삭제할 수 없다.
+     * PostgreSQL은 의존성 오류(2BP01)를 내고 `CASCADE`로 제약을 함께 지울 수 있지만 여기서는 거부만 한다.
+     * - https://www.postgresql.org/docs/current/sql-droptable.html
+     */
     private fun bindDropTable(stmt: Statement.DropTable) {
         requireTable(stmt.tableName)
+        catalog.getForeignKeysReferencing(stmt.tableName).firstOrNull { it.tableName != stmt.tableName }?.let {
+            throw BindException("테이블 '${stmt.tableName}'은 외래 키 제약 '${it.name}'(테이블 '${it.tableName}')이 참조하므로 삭제할 수 없다")
+        }
+    }
+
+    /** DROP INDEX 문을 바인딩한다. 외래 키가 참조하는 유일 인덱스는 삭제할 수 없다. */
+    private fun bindDropIndex(stmt: Statement.DropIndex) {
+        val idx = catalog.getIndex(stmt.indexName) ?: return
+        if (!idx.unique) return
+        catalog.getForeignKeysReferencing(idx.tableName).firstOrNull { it.refColumnName == idx.columnName }?.let {
+            throw BindException("인덱스 '${idx.name}'은 외래 키 제약 '${it.name}'이 참조하므로 삭제할 수 없다")
+        }
     }
 
     private fun bindInsert(stmt: Statement.Insert) {

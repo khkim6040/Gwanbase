@@ -100,6 +100,7 @@ MVP(Phase 0~8) 완성 후에는 `docs/specs/advanced.md`의 축별 우선순위 
 | Constraints & Error Semantics | 데이터 예외 (22001/22003/22012) | `sql/SqlException.kt` (`DataException`), `execution/ExpressionEvaluator.kt`, `sql/SqlExecutor.kt` |
 | Constraints & Error Semantics | 락 타임아웃 (55P03) | `txn/LockManager.kt` (`LockTimeoutException`), `txn/DatabaseSession.kt` (`lockTimeoutMillis`) |
 | Constraints & Error Semantics | UNIQUE / PRIMARY KEY (23505) | `table/UniqueViolationException.kt`, `table/Database.kt` (`checkUniqueConstraints`), `txn/DatabaseSession.kt` (`waitForConflictingRow`) |
+| Constraints & Error Semantics | FOREIGN KEY / CHECK (23503/23514) | `table/ConstraintViolationException.kt`, `table/Catalog.kt` (`ForeignKeyInfo`, `CheckInfo`), `sql/Binder.kt` (`bindCreateTable`), `sql/SqlExecutor.kt` (`rowConstraintChecker`, `checkNoReferencingRows`) |
 
 ### Phase 1 컴포넌트 (완료)
 

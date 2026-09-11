@@ -306,7 +306,7 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 | 검사 시점 | **힙 변경 전** `Database.checkUniqueConstraints()` | **의도적 차이.** MVCC/VACUUM이 없어 실패한 힙 튜플을 dead 버전으로 남길 수 없다. 검사를 선행하면 힙·다른 인덱스에 반쯤 쓰인 상태가 남지 않아 undo도 불필요 |
 | 검사 방법 | `tree.scan(columnKey, equalityScanEnd)`로 접두사 범위 조회, UPDATE는 자기 RID 제외 | 기존 복합 키(`columnKey + rid`) 구조를 그대로 사용 |
 | 동시 삽입 | `DatabaseSession.waitForConflictingRow()` — 충돌 RID에 **S 잠금 획득으로 상대 트랜잭션 종료를 대기** 후 1회 재시도 | xid 대기 대신 행 잠금 대기. Strict 2PL에서는 잠금이 트랜잭션 종료까지 유지되므로 등가. 데드락은 기존 감지기가 40P01로 처리 |
-| 검사–삽입 원자성 | 보장하지 않음 (`Database.findConflictingRid` 주석 참조) | B+Tree 자체가 아직 동시 쓰기에 안전하지 않은 기존 한계. B+Tree 래치 도입 시 함께 해결 |
+| 검사–삽입 원자성 | 보장하지 않음 (`Database.findRidByColumnKey` 주석 참조) | B+Tree 자체가 아직 동시 쓰기에 안전하지 않은 기존 한계. B+Tree 래치 도입 시 함께 해결 |
 | NULL | 검사 제외 (`NULLS DISTINCT`) | 동일 |
 | 에러 | `UniqueViolationException(indexName, conflictingRid)` → 23505, 메시지 `duplicate key value violates unique constraint "..."` | 동일. 예외가 `table` 패키지에 있는 이유는 모듈 의존 방향(`sql → table`) 때문 |
 | `CREATE UNIQUE INDEX` 빌드 | 스캔하며 트리 조회로 검사, 위반 시 Catalog 미등록 | 정렬 기반 인접 검사 대신 단순화. 결과 동일 |
@@ -326,12 +326,56 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 - [`src/backend/access/nbtree/nbtsort.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtsort.c) — 인덱스 빌드 시 유일성 검사
 - [`src/backend/access/nbtree/README`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/README) — B-Tree 동시성 설계 (Lehman & Yao)
 
-### 21. FOREIGN KEY / CHECK (23503, 23514)
+### 21. FOREIGN KEY / CHECK (23503, 23514) ✅
 
-- UNIQUE 위에 얹힌다. FK는 부모 테이블의 UNIQUE 인덱스를 참조한다.
-- INSERT 자식 → 부모 존재 확인, DELETE 부모 → 자식 존재 확인(RESTRICT만 MVP).
-- CHECK는 `ExpressionEvaluator`로 INSERT/UPDATE 시 평가.
-- PostgreSQL: FK는 트리거(`RI_FKey_check_ins`)로 구현된다.
+**PostgreSQL 방식**
+
+- 두 제약 모두 `pg_constraint` 행으로 남는다 (`contype = 'f'` / `'c'`). CHECK 표현식은
+  `conbin`에 노드 트리로 저장되고 `pg_get_constraintdef()`가 텍스트로 되돌린다.
+- CHECK는 실행기가 힙 삽입 **전에** `ExecConstraints()` → `ExecRelCheck()`로 평가한다.
+  결과가 NULL이면 통과한다 (SQL 표준). 위반 시 `ERRCODE_CHECK_VIOLATION`(23514).
+- FK는 **RI 트리거**로 구현된다. 자식 INSERT/UPDATE 후 AFTER 트리거
+  `RI_FKey_check_ins/upd`가 `SELECT 1 FROM ONLY parent WHERE pk = $1 FOR KEY SHARE`를
+  SPI로 실행해 부모 존재를 확인하고, `FOR KEY SHARE` 잠금으로 트랜잭션이 끝날 때까지
+  부모 키 삭제·변경을 막는다. 부모 DELETE/UPDATE 후에는 `RI_FKey_noaction_del/upd`
+  (`ri_restrict`)가 자식 테이블을 `FOR KEY SHARE`로 조회해 참조 행이 남아 있으면
+  `ERRCODE_FOREIGN_KEY_VIOLATION`(23503)을 낸다. `NO ACTION`은 문 끝(또는 DEFERRED면
+  커밋 시점)에, `RESTRICT`는 즉시 검사한다는 점만 다르다.
+- 참조 컬럼에는 유일 인덱스가 있어야 한다 (`transformFkeyCheckAttrs()`). 참조 컬럼을
+  생략하면 부모 PRIMARY KEY를 참조한다. FK 값이 NULL이면 검사하지 않는다
+  (`MATCH SIMPLE` 기본).
+- 제약 이름은 `ChooseConstraintName()`이 `{table}_{columns}_fkey`, `{table}_{columns}_check`로
+  짓는다. CHECK의 `columns`는 표현식이 실제 참조하는 컬럼이다.
+- 참조되는 테이블·인덱스는 의존성 때문에 `DROP`이 거부되고(2BP01), `CASCADE`로
+  제약을 함께 지울 수 있다.
+
+**Gwanbase 구현**
+
+| 항목 | 구현 | PostgreSQL과의 차이 |
+|------|------|---------------------|
+| 제약의 실체 | `Catalog.ForeignKeyInfo`, `Catalog.CheckInfo` — pg_constraint 역할. CHECK 표현식은 `Expression.toSql()` 텍스트로 저장하고 실행 시 `Parser.parseStandaloneExpression()`으로 재파싱 | 노드 트리 대신 텍스트 저장. `table` 패키지가 `sql`의 AST에 의존할 수 없고, 텍스트 왕복이 훨씬 단순하다 |
+| 파서 | 컬럼 제약 `REFERENCES t [(c)]`, `CHECK (expr)` (`ColumnDef.references / check`) | 테이블 수준 제약(`FOREIGN KEY (a) REFERENCES ...`, 테이블 `CHECK`), `ON DELETE CASCADE/SET NULL`, 자기 참조 테이블은 미지원 |
+| 이름 | `{table}_{column}_fkey`, `{table}_{column}_check` (`SqlExecutor.executeCreateTable`) | CHECK 이름에 표현식이 참조하는 컬럼 대신 **선언된 컬럼**을 쓴다 |
+| 바인딩 | `Binder.bindCreateTable`: 부모 테이블·컬럼 존재, 유일 인덱스 존재, 타입 일치, CHECK 컬럼 참조 검증. PK 참조 생략은 `{table}_pkey` 인덱스로 해석 | `indisprimary` 플래그가 없어 이름 규약으로 PK를 찾는다. 타입은 암묵 캐스트 없이 정확히 같아야 한다 |
+| CHECK 검사 | `SqlExecutor.rowConstraintChecker` — INSERT/UPDATE 튜플 완성 후 **힙 변경 전** `ExpressionEvaluator.evaluate()`. `false`만 위반, NULL 통과 | 시점·NULL 의미 동일 |
+| FK 자식 검사 | 같은 함수에서 부모 유일 인덱스로 RID 조회(`Database.findRidByUniqueIndex`) → 부모 RID에 **S 잠금** → 잠금 후 부모 행 재확인 | 트리거 대신 실행기가 직접 호출. `FOR KEY SHARE` 대신 행 S 잠금 — Strict 2PL에서 트랜잭션 종료까지 유지되므로 부모 삭제를 막는 효과는 같다. MVCC가 없어 다른 트랜잭션이 미커밋 삭제한 부모는 즉시 위반으로 본다 |
+| FK 부모 검사 | `SqlExecutor.checkNoReferencingRows` — DELETE/키 변경 UPDATE 시 부모 행 **X 잠금 획득 후** `Database.existsRowWithValue()`로 자식 존재 확인 (자식 컬럼 인덱스가 있으면 트리 조회, 없으면 순차 스캔). 자기 참조 테이블은 자기 RID 제외 | `RESTRICT`만 지원(즉시 검사). 자식 삽입이 부모 S 잠금을 잡으므로 X 잠금을 얻은 뒤에는 미커밋 자식 삽입이 없다. 다른 트랜잭션이 미커밋 삭제한 자식은 보이지 않아 그 트랜잭션이 abort하면 고아 행이 남을 수 있다 (MVCC 부재의 기존 한계) |
+| DROP 거부 | `Binder.bindDropTable / bindDropIndex`: 다른 테이블의 FK가 참조하면 `BindException` | 2BP01 대신 42000. `CASCADE` 미지원 |
+| 에러 | `ConstraintViolationException(constraintName, sqlState, message)` → 23503 / 23514. 메시지는 PostgreSQL 형식 (`new row for relation "t" violates check constraint "..."`, `insert or update on table "..." violates foreign key constraint "..."`, `update or delete on table "..." violates foreign key constraint "..." on table "..."`) | `DataException`처럼 코드를 필드로 가진다. UNIQUE는 충돌 RID를 실어야 해서 별도 클래스 |
+
+- Catalog 직렬화 포맷에 제약 섹션이 추가되었다. 이전 파일은 읽을 수 있지만(섹션 없음 허용)
+  새 파일은 이전 코드로 읽을 수 없다.
+
+**참고 자료**
+
+- [PostgreSQL 문서: Constraints](https://www.postgresql.org/docs/current/ddl-constraints.html) — CHECK NULL 처리, FK 참조 동작(NO ACTION/RESTRICT/CASCADE), MATCH SIMPLE
+- [PostgreSQL 문서: CREATE TABLE](https://www.postgresql.org/docs/current/sql-createtable.html) — `REFERENCES reftable [ ( refcolumn ) ]` 문법
+- [PostgreSQL 문서: pg_constraint](https://www.postgresql.org/docs/current/catalog-pg-constraint.html) — `contype`, `conbin`
+- [PostgreSQL 문서: Error Codes](https://www.postgresql.org/docs/current/errcodes-appendix.html) — 23503 `foreign_key_violation`, 23514 `check_violation`, 2BP01 `dependent_objects_still_exist`
+- [`src/backend/executor/execMain.c`](https://github.com/postgres/postgres/blob/master/src/backend/executor/execMain.c) — `ExecConstraints()`, `ExecRelCheck()`
+- [`src/backend/utils/adt/ri_triggers.c`](https://github.com/postgres/postgres/blob/master/src/backend/utils/adt/ri_triggers.c) — `RI_FKey_check()`, `ri_restrict()`, `ri_PerformCheck()`, `ri_ReportViolation()`
+- [`src/backend/commands/tablecmds.c`](https://github.com/postgres/postgres/blob/master/src/backend/commands/tablecmds.c) — `transformFkeyCheckAttrs()` (참조 컬럼의 유일 인덱스 요구), `ATAddForeignKeyConstraint()`
+- [`src/backend/commands/indexcmds.c`](https://github.com/postgres/postgres/blob/master/src/backend/commands/indexcmds.c) — `ChooseConstraintName()`
 
 ### 22. Serialization Failure (40001)
 
@@ -380,7 +424,7 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 | 2 | 데이터 예외 ✅ | 검사 한 곳씩, 낮은 비용 |
 | 3 | 락 타임아웃 ✅ | 무한 대기 제거, 운영 안정성 |
 | 4 | UNIQUE / PK ✅ | 중복 키 에러 — 실무에서 가장 빈번한 재시도 대상 |
-| 5 | FK / CHECK | UNIQUE 위에 구축 |
+| 5 | FK / CHECK ✅ | UNIQUE 위에 구축 |
 | 6 | Serialization Failure | MVCC 선행 필요 |
 
 ## 참고 자료

@@ -126,15 +126,18 @@ class SqlExecutor(
     /**
      * CREATE TABLE 문을 실행한다.
      *
-     * PRIMARY KEY / UNIQUE 컬럼 제약은 유일 인덱스로 구현한다. 인덱스 이름은 PostgreSQL 규칙
-     * (`{table}_pkey`, `{table}_{column}_key`)을 따른다.
+     * PRIMARY KEY / UNIQUE 컬럼 제약은 유일 인덱스로 구현한다. 인덱스·제약 이름은 PostgreSQL 규칙
+     * (`{table}_pkey`, `{table}_{column}_key`, `{table}_{column}_fkey`, `{table}_{column}_check`)을 따른다.
+     * PostgreSQL은 CHECK 이름을 표현식이 실제 참조하는 컬럼으로 짓지만(`ChooseConstraintName`),
+     * 여기서는 제약이 선언된 컬럼 이름을 쓴다.
      * - https://www.postgresql.org/docs/current/ddl-constraints.html
+     * - https://github.com/postgres/postgres/blob/master/src/backend/commands/indexcmds.c (`ChooseConstraintName`)
      */
     private fun executeCreateTable(stmt: Statement.CreateTable): ExecuteResult.Created {
         val columns = stmt.columns.map { colDef ->
             Column(
                 name = colDef.name,
-                type = toDataType(colDef.dataType),
+                type = colDef.dataType.toDataType(),
                 maxLength = if (colDef.dataType is SqlDataType.VarcharType) colDef.dataType.maxLength else 0,
                 nullable = colDef.nullable,
             )
@@ -146,6 +149,17 @@ class SqlExecutor(
                 database.createIndex("${stmt.tableName}_pkey", stmt.tableName, colDef.name, unique = true)
             } else if (colDef.unique) {
                 database.createIndex("${stmt.tableName}_${colDef.name}_key", stmt.tableName, colDef.name, unique = true)
+            }
+        }
+        val catalog = database.getCatalog()
+        for (colDef in stmt.columns) {
+            colDef.check?.let {
+                catalog.createCheck("${stmt.tableName}_${colDef.name}_check", stmt.tableName, it.toSql())
+            }
+            colDef.references?.let { ref ->
+                // Binder가 참조 컬럼 생략 시 PRIMARY KEY 존재를 이미 확인했다
+                val refColumn = ref.column ?: catalog.getIndex("${ref.table}_pkey")!!.columnName
+                catalog.createForeignKey("${stmt.tableName}_${colDef.name}_fkey", stmt.tableName, colDef.name, ref.table, refColumn)
             }
         }
         return ExecuteResult.Created(stmt.tableName)
@@ -174,6 +188,7 @@ class SqlExecutor(
         }
 
         val tuple = Tuple(schema, valuesArray)
+        rowConstraintChecker(stmt.tableName, schema)(tuple)
         val rid = session?.insertTupleWithLock(stmt.tableName, tuple)
             ?: database.insertTuple(stmt.tableName, tuple)
         return ExecuteResult.Inserted(rid)
@@ -234,6 +249,7 @@ class SqlExecutor(
             }
         }
 
+        val checkRow = rowConstraintChecker(stmt.tableName, schema)
         for ((rid, _) in matches) {
             // X 잠금 획득 후 최신 튜플을 다시 읽어 Lost Update를 방지한다.
             // 잠금 없이 스캔한 튜플은 stale할 수 있으므로, 잠금 획득 후 재조회한다.
@@ -250,6 +266,8 @@ class SqlExecutor(
                 newValues[colIndex] = coerceValue(rawValue, schema.column(colIndex))
             }
             val newTuple = Tuple(schema, newValues)
+            checkRow(newTuple)
+            checkNoReferencingRows(stmt.tableName, schema, freshTuple, newTuple, rid)
             if (session != null) {
                 session.updateTupleWithLockAlreadyHeld(stmt.tableName, rid, newTuple)
             } else {
@@ -280,7 +298,14 @@ class SqlExecutor(
             }
         }
 
+        val referenced = database.getCatalog().getForeignKeysReferencing(stmt.tableName).isNotEmpty()
         for (rid in toDelete) {
+            if (referenced) {
+                // 부모 X 잠금을 먼저 잡아야 자식 삽입(부모 S 잠금)과 직렬화된다
+                session?.acquireExclusiveLock(stmt.tableName, rid)
+                val tuple = database.getTuple(stmt.tableName, rid) ?: continue
+                checkNoReferencingRows(stmt.tableName, schema, tuple, null, rid)
+            }
             session?.deleteTupleWithLock(stmt.tableName, rid)
                 ?: database.deleteTuple(stmt.tableName, rid)
         }
@@ -362,17 +387,81 @@ class SqlExecutor(
         }
     }
 
+    // ── 제약 검사 ──
+
     /**
-     * SQL 데이터 타입을 스토리지 데이터 타입으로 변환한다.
+     * INSERT/UPDATE로 만들어질 행에 대한 CHECK·외래 키(자식 쪽) 검사 함수를 만든다.
+     *
+     * 힙을 변경하기 **전에** 호출하며, 위반 시 반쯤 쓰인 상태가 남지 않는다 (UNIQUE와 같은 이유).
+     * PostgreSQL도 CHECK는 힙 삽입 전 `ExecConstraints()`에서 평가하고, 결과가 NULL이면 통과시킨다.
+     * 외래 키는 AFTER 트리거 `RI_FKey_check_ins/upd`가 부모 행을 `FOR KEY SHARE`로 조회한다.
+     * 여기서는 부모 유일 인덱스로 RID를 찾아 S 잠금을 건 뒤 존재를 재확인하는 것으로 대신한다
+     * — Strict 2PL에서 S 잠금은 트랜잭션 종료까지 유지되므로 부모 삭제를 막는 효과가 같다.
+     * 부모 행이 다른 트랜잭션에 의해 미커밋 삭제된 경우 MVCC가 없어 즉시 위반으로 본다.
+     * - https://github.com/postgres/postgres/blob/master/src/backend/executor/execMain.c (`ExecConstraints`)
+     * - https://github.com/postgres/postgres/blob/master/src/backend/utils/adt/ri_triggers.c
+     *   (`RI_FKey_check`, `ri_PerformCheck`)
+     * - https://www.postgresql.org/docs/current/ddl-constraints.html (CHECK NULL 처리, MATCH SIMPLE)
      */
-    private fun toDataType(sqlType: SqlDataType): DataType {
-        return when (sqlType) {
-            is SqlDataType.BooleanType -> DataType.BOOLEAN
-            is SqlDataType.IntType -> DataType.INT32
-            is SqlDataType.BigIntType -> DataType.INT64
-            is SqlDataType.DoubleType -> DataType.FLOAT64
-            is SqlDataType.TimestampType -> DataType.TIMESTAMP
-            is SqlDataType.VarcharType -> DataType.VARCHAR
+    private fun rowConstraintChecker(tableName: String, schema: Schema): (Tuple) -> Unit {
+        val catalog = database.getCatalog()
+        val checks = catalog.getChecksForTable(tableName).map { chk ->
+            chk to Parser(Lexer(chk.exprSql).tokenize()).parseStandaloneExpression()
+        }
+        val foreignKeys = catalog.getForeignKeysForTable(tableName).map { fk ->
+            val parentIndex = catalog.getIndexesForTable(fk.refTableName)
+                .first { it.unique && it.columnName == fk.refColumnName }
+            fk to parentIndex
+        }
+        return { tuple ->
+            for ((chk, expr) in checks) {
+                if (ExpressionEvaluator.evaluate(schema, tuple, expr) == false) {
+                    throw ConstraintViolationException(
+                        chk.name, "23514",
+                        "new row for relation \"$tableName\" violates check constraint \"${chk.name}\"",
+                    )
+                }
+            }
+            for ((fk, parentIndex) in foreignKeys) {
+                val colIndex = schema.columnIndex(fk.columnName)
+                val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, schema.column(colIndex).type)
+                    ?: continue
+                val parentRid = database.findRidByUniqueIndex(parentIndex, value)
+                if (parentRid != null) session?.acquireSharedLock(fk.refTableName, parentRid)
+                if (parentRid == null || database.getTuple(fk.refTableName, parentRid) == null) {
+                    throw ConstraintViolationException(
+                        fk.name, "23503",
+                        "insert or update on table \"$tableName\" violates foreign key constraint \"${fk.name}\"",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 부모 행을 삭제하거나 키를 바꾸기 전에 그 행을 참조하는 자식 행이 없는지 검사한다 (RESTRICT).
+     *
+     * 호출 시점에는 부모 행에 X 잠금이 걸려 있어야 한다. 자식 삽입은 부모 행 S 잠금을 잡으므로,
+     * X 잠금을 얻었다면 미커밋 자식 삽입은 없다. PostgreSQL의 `RI_FKey_noaction_del/upd`가
+     * 자식 테이블을 `SELECT 1 ... FOR KEY SHARE`로 조회하는 것에 해당한다.
+     * - https://github.com/postgres/postgres/blob/master/src/backend/utils/adt/ri_triggers.c (`ri_restrict`)
+     *
+     * @param newTuple UPDATE면 변경 후 행. 참조 컬럼 값이 같으면 검사하지 않는다
+     * @param selfRid 자기 참조 테이블에서 자기 자신을 자식으로 세지 않기 위한 RID
+     */
+    private fun checkNoReferencingRows(tableName: String, schema: Schema, oldTuple: Tuple, newTuple: Tuple?, selfRid: RID) {
+        for (fk in database.getCatalog().getForeignKeysReferencing(tableName)) {
+            val colIndex = schema.columnIndex(fk.refColumnName)
+            val type = schema.column(colIndex).type
+            val oldValue = ExpressionEvaluator.getTupleValue(oldTuple, colIndex, type) ?: continue
+            if (newTuple != null && ExpressionEvaluator.getTupleValue(newTuple, colIndex, type) == oldValue) continue
+            val excludeRid = if (fk.tableName == tableName) selfRid else null
+            if (database.existsRowWithValue(fk.tableName, fk.columnName, oldValue, excludeRid)) {
+                throw ConstraintViolationException(
+                    fk.name, "23503",
+                    "update or delete on table \"$tableName\" violates foreign key constraint \"${fk.name}\" on table \"${fk.tableName}\"",
+                )
+            }
         }
     }
 }

@@ -209,6 +209,82 @@ class CatalogIndexTest {
         catalog.getIndex("orders_pkey").shouldNotBeNull()
     }
 
+    // --- 제약(FK / CHECK) 테스트 ---
+
+    @Test
+    fun `외래 키와 CHECK 제약 등록 후 테이블별 조회`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.createTable("orders", userSchema)
+
+        catalog.createForeignKey("orders_id_fkey", "orders", "id", "users", "id")
+        catalog.createCheck("users_id_check", "users", "(id > 0)")
+
+        catalog.getForeignKeysForTable("orders") shouldBe listOf(
+            ForeignKeyInfo("orders_id_fkey", "orders", "id", "users", "id")
+        )
+        catalog.getForeignKeysReferencing("users") shouldBe listOf(
+            ForeignKeyInfo("orders_id_fkey", "orders", "id", "users", "id")
+        )
+        catalog.getForeignKeysForTable("users").shouldBeEmpty()
+        catalog.getChecksForTable("users") shouldBe listOf(CheckInfo("users_id_check", "users", "(id > 0)"))
+        catalog.getChecksForTable("orders").shouldBeEmpty()
+    }
+
+    @Test
+    fun `제약 이름 중복 시 예외`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.createCheck("c1", "users", "(id > 0)")
+        assertThrows<IllegalArgumentException> { catalog.createCheck("c1", "users", "(id < 0)") }
+        assertThrows<IllegalArgumentException> { catalog.createForeignKey("c1", "users", "id", "users", "id") }
+    }
+
+    @Test
+    fun `제약 영속화 후 재로드 시 보존`() {
+        val dbPath = tempDir.resolve("constraint_persist_test.db")
+
+        val catalogPageId: Int
+        run {
+            val dm = DiskManager(dbPath)
+            val bpm = BufferPoolManager(dm, 64)
+            val catalog = Catalog.createNew(bpm)
+            catalogPageId = catalog.catalogPageId
+            catalog.createTable("users", userSchema)
+            catalog.createTable("orders", userSchema)
+            catalog.createForeignKey("orders_id_fkey", "orders", "id", "users", "id")
+            catalog.createCheck("users_id_check", "users", "(id > 0)")
+            bpm.flushAllPages()
+            dm.close()
+        }
+
+        run {
+            val dm = DiskManager(dbPath)
+            val bpm = BufferPoolManager(dm, 64)
+            val catalog = Catalog.load(bpm, catalogPageId)
+            catalog.getForeignKeysForTable("orders") shouldBe listOf(
+                ForeignKeyInfo("orders_id_fkey", "orders", "id", "users", "id")
+            )
+            catalog.getChecksForTable("users") shouldBe listOf(CheckInfo("users_id_check", "users", "(id > 0)"))
+            dm.close()
+        }
+    }
+
+    @Test
+    fun `테이블 삭제 시 해당 테이블의 제약도 제거`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.createTable("orders", userSchema)
+        catalog.createForeignKey("orders_id_fkey", "orders", "id", "users", "id")
+        catalog.createCheck("orders_id_check", "orders", "(id > 0)")
+
+        catalog.dropTable("orders")
+
+        catalog.getForeignKeysForTable("orders").shouldBeEmpty()
+        catalog.getForeignKeysReferencing("users").shouldBeEmpty()
+        catalog.getChecksForTable("orders").shouldBeEmpty()
+    }
+
     // --- TableStats / ColumnStats 테스트 ---
 
     @Test
