@@ -241,6 +241,7 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 | `BindException` | 42000 | syntax_error_or_access_rule_violation (세분화 전 임시) |
 | `DeadlockException` | 40P01 | deadlock_detected |
 | `DataException` | 필드값 (22xxx) | data_exception — 코드를 필드로 보유 |
+| `LockTimeoutException` | 55P03 | lock_not_available |
 | 그 외 | XX000 | internal_error |
 | (트랜잭션 실패 상태) | 25P02 | in_failed_sql_transaction — 기존 구현 |
 
@@ -262,11 +263,16 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 - `VARCHAR(n)`의 n은 PostgreSQL과 동일하게 **문자 수** 기준이다 (바이트 아님).
 - 실수 `/ 0`은 IEEE Infinity 대신 에러 — PostgreSQL float8 동작과 일치.
 
-### 19. 락 타임아웃 (55P03)
+### 19. 락 타임아웃 (55P03) ✅
 
-- 현재 `LockManager`는 `latch.await()`로 무한 대기한다.
-- 세션별 `lock_timeout`을 두고 `await(timeout)` 초과 시 `LockTimeoutException` → 55P03.
-- PostgreSQL: `lock_timeout` GUC, `SELECT ... FOR UPDATE NOWAIT`
+- `LockManager.acquire(..., timeoutMillis)` — `latch.await(timeout)` 초과 시
+  대기열에서 제거하고 `LockTimeoutException` → 55P03. 0이면 무한 대기.
+- `DatabaseSession.lockTimeoutMillis` (기본 0) — PostgreSQL `lock_timeout` GUC에 해당.
+  세션 객체 프로퍼티로만 설정 가능하며 `SET lock_timeout` SQL은 미지원 (후속).
+- 타임아웃 직전에 잠금이 부여되는 경합은 `latch.count == 0` 재확인으로 처리한다.
+- 대기자를 제거한 뒤 `grantWaiters()`를 재실행한다 — FIFO 큐 점프 방지 규칙 때문에
+  앞 대기자가 사라지면 뒤 대기자가 호환될 수 있다. 데드락 victim 제거도 같은 경로를 쓴다.
+- PostgreSQL: `lock_timeout` GUC(기본 0=무한), `SELECT ... FOR UPDATE NOWAIT`
 - MySQL: `innodb_lock_wait_timeout` (기본 50초), 에러 1205
 
 ### 20. UNIQUE / PRIMARY KEY (23505)
@@ -331,7 +337,7 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 |------|------|------|
 | 1 | SQLSTATE 매핑 ✅ | 이후 모든 에러의 전달 경로 |
 | 2 | 데이터 예외 ✅ | 검사 한 곳씩, 낮은 비용 |
-| 3 | 락 타임아웃 | 무한 대기 제거, 운영 안정성 |
+| 3 | 락 타임아웃 ✅ | 무한 대기 제거, 운영 안정성 |
 | 4 | UNIQUE / PK | 중복 키 에러 — 실무에서 가장 빈번한 재시도 대상 |
 | 5 | FK / CHECK | UNIQUE 위에 구축 |
 | 6 | Serialization Failure | MVCC 선행 필요 |

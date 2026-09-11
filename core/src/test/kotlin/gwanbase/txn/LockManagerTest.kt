@@ -2,6 +2,7 @@ package gwanbase.txn
 
 import gwanbase.table.RID
 import io.kotest.matchers.shouldBe
+import io.kotest.assertions.throwables.shouldThrow
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import io.kotest.matchers.ints.shouldBeLessThanOrEqual
@@ -318,5 +319,72 @@ class LockManagerTest {
         errors.get() shouldBe 0
         // 순환 대기이므로 최소 1개의 데드락이 감지되어야 한다
         (deadlocks.get() >= 1) shouldBe true
+    }
+
+    // ── 락 타임아웃 ──
+
+    @Test
+    fun `타임아웃 내에 잠금을 얻지 못하면 LockTimeoutException`() {
+        val target = LockTarget("t", RID(1, 0))
+        lm.acquire(txnId = 1, target = target, mode = LockMode.EXCLUSIVE)
+
+        shouldThrow<LockTimeoutException> {
+            lm.acquire(txnId = 2, target = target, mode = LockMode.SHARED, timeoutMillis = 100)
+        }
+    }
+
+    @Test
+    fun `타임아웃 전에 해제되면 정상 획득한다`() {
+        val target = LockTarget("t", RID(1, 0))
+        lm.acquire(txnId = 1, target = target, mode = LockMode.EXCLUSIVE)
+
+        Thread { Thread.sleep(50); lm.releaseAll(txnId = 1) }.start()
+        lm.acquire(txnId = 2, target = target, mode = LockMode.SHARED, timeoutMillis = 2000)
+    }
+
+    @Test
+    fun `타임아웃된 대기자는 대기열에서 제거되어 뒤 대기자를 막지 않는다`() {
+        val target = LockTarget("t", RID(1, 0))
+        lm.acquire(txnId = 1, target = target, mode = LockMode.SHARED)
+
+        // txn2가 X를 기다리는 동안 txn3의 S는 큐 점프 방지로 뒤에서 대기한다
+        val t2 = Thread {
+            runCatching { lm.acquire(txnId = 2, target = target, mode = LockMode.EXCLUSIVE, timeoutMillis = 100) }
+        }
+        t2.start()
+        Thread.sleep(30)
+
+        val acquired3 = AtomicBoolean(false)
+        val t3 = Thread {
+            lm.acquire(txnId = 3, target = target, mode = LockMode.SHARED)
+            acquired3.set(true)
+        }
+        t3.start()
+        Thread.sleep(30)
+        acquired3.get() shouldBe false
+
+        // txn2 타임아웃 후 txn1은 여전히 S 보유 → txn3의 S는 호환되므로 부여되어야 한다
+        t2.join(2000)
+        t3.join(2000)
+        acquired3.get() shouldBe true
+    }
+
+    @Test
+    fun `timeoutMillis 0은 무한 대기다`() {
+        val target = LockTarget("t", RID(1, 0))
+        lm.acquire(txnId = 1, target = target, mode = LockMode.EXCLUSIVE)
+
+        val acquired = AtomicBoolean(false)
+        val t = Thread {
+            lm.acquire(txnId = 2, target = target, mode = LockMode.SHARED, timeoutMillis = 0)
+            acquired.set(true)
+        }
+        t.start()
+        Thread.sleep(200)
+        acquired.get() shouldBe false
+
+        lm.releaseAll(txnId = 1)
+        t.join(2000)
+        acquired.get() shouldBe true
     }
 }

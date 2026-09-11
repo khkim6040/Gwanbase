@@ -5,6 +5,7 @@ import gwanbase.sql.DataException
 import gwanbase.sql.ParseException
 import gwanbase.table.Database
 import gwanbase.txn.DeadlockException
+import gwanbase.txn.LockTimeoutException
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import org.junit.jupiter.api.AfterEach
@@ -191,6 +192,7 @@ class ConnectionHandlerTest {
         ConnectionHandler.sqlStateOf(BindException("x")) shouldBe "42000"
         ConnectionHandler.sqlStateOf(DeadlockException(1)) shouldBe "40P01"
         ConnectionHandler.sqlStateOf(DataException("x", "22012")) shouldBe "22012"
+        ConnectionHandler.sqlStateOf(LockTimeoutException(1, 100)) shouldBe "55P03"
         ConnectionHandler.sqlStateOf(IllegalStateException("x")) shouldBe "XX000"
     }
 
