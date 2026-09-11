@@ -283,6 +283,74 @@ class BinderTest {
         ex.message shouldContain "nonexistent"
     }
 
+    // ── FK / CHECK 제약 바인딩 ──
+
+    @Test
+    fun `REFERENCES 대상 테이블이 없으면 에러`() {
+        val ex = assertThrows<BindException> {
+            binder.bind(parse("CREATE TABLE orders (uid INT REFERENCES nobody(id))"))
+        }
+        ex.message shouldContain "nobody"
+    }
+
+    @Test
+    fun `REFERENCES 대상 컬럼에 유일 인덱스가 없으면 에러`() {
+        val ex = assertThrows<BindException> {
+            binder.bind(parse("CREATE TABLE orders (uid INT REFERENCES users(id))"))
+        }
+        ex.message shouldContain "유일"
+    }
+
+    @Test
+    fun `REFERENCES 컬럼 생략 시 부모에 PRIMARY KEY가 없으면 에러`() {
+        assertThrows<BindException> {
+            binder.bind(parse("CREATE TABLE orders (uid INT REFERENCES users)"))
+        }
+    }
+
+    @Test
+    fun `REFERENCES 컬럼 타입이 다르면 에러`() {
+        database.createIndex("users_pkey", "users", "id", unique = true)
+        val ex = assertThrows<BindException> {
+            binder.bind(parse("CREATE TABLE orders (uid VARCHAR(10) REFERENCES users(id))"))
+        }
+        ex.message shouldContain "타입"
+    }
+
+    @Test
+    fun `REFERENCES 대상이 유일 인덱스를 가지면 통과`() {
+        database.createIndex("users_pkey", "users", "id", unique = true)
+        val stmt = parse("CREATE TABLE orders (uid INT REFERENCES users(id))")
+        binder.bind(stmt) shouldBe stmt
+    }
+
+    @Test
+    fun `CHECK가 존재하지 않는 컬럼을 참조하면 에러`() {
+        val ex = assertThrows<BindException> {
+            binder.bind(parse("CREATE TABLE t (a INT CHECK (b > 0))"))
+        }
+        ex.message shouldContain "b"
+    }
+
+    @Test
+    fun `다른 테이블이 참조하는 테이블은 DROP TABLE 할 수 없다`() {
+        database.createIndex("users_pkey", "users", "id", unique = true)
+        database.getCatalog().createForeignKey("orders_uid_fkey", "orders", "uid", "users", "id")
+        val ex = assertThrows<BindException> {
+            binder.bind(parse("DROP TABLE users"))
+        }
+        ex.message shouldContain "orders_uid_fkey"
+    }
+
+    @Test
+    fun `외래 키가 참조하는 유일 인덱스는 DROP INDEX 할 수 없다`() {
+        database.createIndex("users_pkey", "users", "id", unique = true)
+        database.getCatalog().createForeignKey("orders_uid_fkey", "orders", "uid", "users", "id")
+        assertThrows<BindException> {
+            binder.bind(parse("DROP INDEX users_pkey"))
+        }
+    }
+
     @Test
     fun `EXPLAIN 내부 문이 바인딩된다`() {
         val stmt = parse("EXPLAIN SELECT * FROM users")

@@ -131,6 +131,16 @@ sealed class SqlDataType {
 
     /** 가변 길이 문자열 타입. */
     data class VarcharType(val maxLength: Int) : SqlDataType()
+
+    /** 스토리지 데이터 타입으로 변환한다. */
+    fun toDataType(): gwanbase.table.DataType = when (this) {
+        is BooleanType -> gwanbase.table.DataType.BOOLEAN
+        is IntType -> gwanbase.table.DataType.INT32
+        is BigIntType -> gwanbase.table.DataType.INT64
+        is DoubleType -> gwanbase.table.DataType.FLOAT64
+        is TimestampType -> gwanbase.table.DataType.TIMESTAMP
+        is VarcharType -> gwanbase.table.DataType.VARCHAR
+    }
 }
 
 /**
