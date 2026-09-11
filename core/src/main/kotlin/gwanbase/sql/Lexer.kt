@@ -56,6 +56,9 @@ class Lexer(private val source: String) {
             "INDEX" to TokenType.INDEX,
             "ANALYZE" to TokenType.ANALYZE,
             "EXPLAIN" to TokenType.EXPLAIN,
+            "UNIQUE" to TokenType.UNIQUE,
+            "PRIMARY" to TokenType.PRIMARY,
+            "KEY" to TokenType.KEY,
         )
     }
 

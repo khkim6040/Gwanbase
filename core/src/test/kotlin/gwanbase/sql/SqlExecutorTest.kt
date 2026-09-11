@@ -37,6 +37,63 @@ class SqlExecutorTest {
         tableInfo.schema.columnCount shouldBe 3
     }
 
+    @Test
+    fun `PRIMARY KEY 컬럼은 NOT NULL이며 table_pkey 유일 인덱스가 생성된다`() {
+        executor.execute("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50))")
+        database.getTable("users")!!.schema.column(0).nullable shouldBe false
+        val idx = database.getCatalog().getIndex("users_pkey")
+        idx.shouldNotBeNull()
+        idx.columnName shouldBe "id"
+        idx.unique shouldBe true
+    }
+
+    @Test
+    fun `UNIQUE 컬럼은 table_col_key 유일 인덱스가 생성된다`() {
+        executor.execute("CREATE TABLE users (id INT, email VARCHAR(50) UNIQUE)")
+        val idx = database.getCatalog().getIndex("users_email_key")
+        idx.shouldNotBeNull()
+        idx.columnName shouldBe "email"
+        idx.unique shouldBe true
+    }
+
+    @Test
+    fun `PRIMARY KEY 중복 삽입 시 UniqueViolationException`() {
+        executor.execute("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50))")
+        executor.execute("INSERT INTO users (id, name) VALUES (1, 'a')")
+        val e = assertThrows<UniqueViolationException> {
+            executor.execute("INSERT INTO users (id, name) VALUES (1, 'b')")
+        }
+        e.indexName shouldBe "users_pkey"
+    }
+
+    @Test
+    fun `UPDATE로 다른 행의 PRIMARY KEY 값과 충돌 시 UniqueViolationException`() {
+        executor.execute("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50))")
+        executor.execute("INSERT INTO users (id, name) VALUES (1, 'a')")
+        executor.execute("INSERT INTO users (id, name) VALUES (2, 'b')")
+        assertThrows<UniqueViolationException> {
+            executor.execute("UPDATE users SET id = 1 WHERE id = 2")
+        }
+    }
+
+    @Test
+    fun `CREATE UNIQUE INDEX 후 중복 삽입 시 UniqueViolationException`() {
+        executor.execute("CREATE TABLE users (id INT, email VARCHAR(50))")
+        executor.execute("CREATE UNIQUE INDEX users_email_key ON users (email)")
+        executor.execute("INSERT INTO users (id, email) VALUES (1, 'a@x.com')")
+        assertThrows<UniqueViolationException> {
+            executor.execute("INSERT INTO users (id, email) VALUES (2, 'a@x.com')")
+        }
+    }
+
+    @Test
+    fun `DROP TABLE 후 같은 이름의 PRIMARY KEY 테이블을 다시 만들 수 있다`() {
+        executor.execute("CREATE TABLE users (id INT PRIMARY KEY)")
+        executor.execute("DROP TABLE users")
+        executor.execute("CREATE TABLE users (id INT PRIMARY KEY)")
+        database.getCatalog().getIndex("users_pkey").shouldNotBeNull()
+    }
+
     // ── 2. DROP TABLE ──
 
     @Test

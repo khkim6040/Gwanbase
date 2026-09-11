@@ -28,6 +28,10 @@ data class ColumnStats(
 
 /**
  * 인덱스 메타데이터.
+ *
+ * @param unique 유일 인덱스 여부. UNIQUE/PRIMARY KEY 제약은 유일 인덱스로 구현된다.
+ *   PostgreSQL `pg_index.indisunique`와 같은 역할이다.
+ *   https://www.postgresql.org/docs/current/catalog-pg-index.html
  */
 data class IndexInfo(
     val indexId: Int,
@@ -35,6 +39,7 @@ data class IndexInfo(
     val tableName: String,
     val columnName: String,
     val rootPageId: Int,
+    val unique: Boolean = false,
 )
 
 /**
@@ -108,19 +113,28 @@ class Catalog(
     /** 모든 테이블 목록 */
     fun listTables(): List<TableInfo> = tables.toList()
 
-    /** 테이블을 삭제한다. */
+    /** 테이블을 삭제한다. 해당 테이블에 속한 인덱스도 함께 제거한다. */
     fun dropTable(name: String): Boolean {
         val removed = tables.removeAll { it.name == name }
-        if (removed) flush()
+        if (removed) {
+            indexes.removeAll { it.tableName == name }
+            flush()
+        }
         return removed
     }
 
     // --- 인덱스 관리 ---
 
     /** 인덱스를 생성한다. */
-    fun createIndex(name: String, tableName: String, columnName: String, rootPageId: Int): IndexInfo {
+    fun createIndex(
+        name: String,
+        tableName: String,
+        columnName: String,
+        rootPageId: Int,
+        unique: Boolean = false,
+    ): IndexInfo {
         require(indexes.none { it.name == name }) { "인덱스 '$name'이 이미 존재한다" }
-        val info = IndexInfo(nextIndexId++, name, tableName, columnName, rootPageId)
+        val info = IndexInfo(nextIndexId++, name, tableName, columnName, rootPageId, unique)
         indexes.add(info)
         flush()
         return info
@@ -191,8 +205,8 @@ class Catalog(
             val nameBytes = idx.name.toByteArray(Charsets.UTF_8).size
             val tableNameBytes = idx.tableName.toByteArray(Charsets.UTF_8).size
             val colNameBytes = idx.columnName.toByteArray(Charsets.UTF_8).size
-            size += 4 + 2 + nameBytes + 2 + tableNameBytes + 2 + colNameBytes + 4
-            // indexId, nameLen, name, tableNameLen, tableName, colNameLen, colName, rootPageId
+            size += 4 + 2 + nameBytes + 2 + tableNameBytes + 2 + colNameBytes + 4 + 1
+            // indexId, nameLen, name, tableNameLen, tableName, colNameLen, colName, rootPageId, unique
         }
         // 통계 섹션
         size += 4 // statsTableCount
@@ -263,6 +277,7 @@ class Catalog(
                 buf.put(colNameBytes)
 
                 buf.putInt(idx.rootPageId)
+                buf.put(if (idx.unique) 1.toByte() else 0.toByte())
             }
 
             // 통계 섹션
@@ -353,8 +368,9 @@ class Catalog(
                     val colName = String(colNameBytes, Charsets.UTF_8)
 
                     val rootPageId = buf.getInt()
+                    val unique = buf.get() != 0.toByte()
 
-                    indexes.add(IndexInfo(indexId, idxName, tblName, colName, rootPageId))
+                    indexes.add(IndexInfo(indexId, idxName, tblName, colName, rootPageId, unique))
                 }
             }
 

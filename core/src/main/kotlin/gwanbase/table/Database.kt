@@ -157,6 +157,7 @@ class Database private constructor(
         checkOpen()
         val info = catalog.getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
+        checkUniqueConstraints(tableName, info.schema, tuple, selfRid = null)
         val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
         val rid = heapFile.insertTuple(tuple.serialize())
         maintainIndexesOnInsert(tableName, info.schema, tuple, rid)
@@ -218,8 +219,11 @@ class Database private constructor(
      * 인덱스를 생성한다.
      *
      * 기존 테이블 데이터를 스캔하여 B+Tree를 구축한 뒤 Catalog에 등록한다.
+     * [unique]가 true면 빌드 중 중복 키를 발견하는 즉시 [UniqueViolationException]을 던지고
+     * Catalog에는 등록하지 않는다. PostgreSQL은 정렬 후 인접 중복을 검사하지만 결과는 같다.
+     * - https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtsort.c
      */
-    fun createIndex(indexName: String, tableName: String, columnName: String) {
+    fun createIndex(indexName: String, tableName: String, columnName: String, unique: Boolean = false) {
         checkOpen()
         val tableInfo = getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
@@ -232,9 +236,14 @@ class Database private constructor(
             val (rid, tuple) = iter.next()
             val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
             val columnKey = KeySerializer.serializeKey(value, colType)
+            if (unique) {
+                findConflictingRid(tree, columnKey, selfRid = null)?.let {
+                    throw UniqueViolationException(indexName, it)
+                }
+            }
             tree.insert(KeySerializer.compositeKey(columnKey, rid), KeySerializer.serializeRid(rid))
         }
-        catalog.createIndex(indexName, tableName, columnName, tree.rootPageId)
+        catalog.createIndex(indexName, tableName, columnName, tree.rootPageId, unique)
     }
 
     /** 인덱스를 삭제한다. */
@@ -256,6 +265,7 @@ class Database private constructor(
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
         // 이전 튜플을 읽어 인덱스 정리에 사용한다
         val oldTuple = getTuple(tableName, rid)
+        checkUniqueConstraints(tableName, info.schema, tuple, selfRid = rid)
         val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
         val newRid = heapFile.updateTuple(rid, tuple.serialize())
         // 인덱스 유지보수: 이전 키 제거 후 새 키 삽입
@@ -316,6 +326,47 @@ class Database private constructor(
     }
 
     // ── 인덱스 유지보수 ──
+
+    /**
+     * 테이블의 모든 유일 인덱스에 대해 [tuple]이 기존 행과 충돌하는지 검사한다.
+     *
+     * 힙과 인덱스를 변경하기 **전에** 호출하여, 위반 시 반쯤 쓰인 상태가 남지 않게 한다.
+     * PostgreSQL은 힙 삽입 후 인덱스 삽입 시점(`_bt_check_unique`)에 검사하고 실패한 힙 튜플은
+     * dead 버전으로 남겨 VACUUM이 정리하지만, Gwanbase는 MVCC가 없어 검사를 선행한다.
+     * NULL 값은 검사하지 않는다 (`NULLS DISTINCT`).
+     * - https://github.com/postgres/postgres/blob/master/src/backend/executor/execIndexing.c
+     *   (`ExecInsertIndexTuples`: 힙 삽입 후 호출됨)
+     * - https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtinsert.c
+     *   (`_bt_check_unique`)
+     * - https://www.postgresql.org/docs/current/indexes-unique.html (NULL 처리)
+     *
+     * @param selfRid UPDATE 시 자기 자신의 RID. 같은 행의 기존 엔트리는 충돌로 보지 않는다.
+     */
+    private fun checkUniqueConstraints(tableName: String, schema: Schema, tuple: Tuple, selfRid: RID?) {
+        for (indexInfo in catalog.getIndexesForTable(tableName)) {
+            if (!indexInfo.unique) continue
+            val colIndex = schema.columnIndex(indexInfo.columnName)
+            val colType = schema.column(colIndex).type
+            val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
+            val columnKey = KeySerializer.serializeKey(value, colType)
+            val tree = BPlusTree(bpm, indexInfo.rootPageId)
+            findConflictingRid(tree, columnKey, selfRid)?.let {
+                throw UniqueViolationException(indexInfo.name, it)
+            }
+        }
+    }
+
+    /** [columnKey]와 같은 컬럼 값을 가진 엔트리 중 [selfRid]가 아닌 첫 RID를 반환한다. 없으면 null. */
+    private fun findConflictingRid(tree: BPlusTree, columnKey: ByteArray, selfRid: RID?): RID? {
+        // 검사와 삽입 사이에 다른 스레드가 끼어들 수 있다. B+Tree 자체가 아직 동시 쓰기에
+        // 안전하지 않으므로 같은 한계로 두고, B+Tree 래치 도입 시 함께 해결한다.
+        val iter = tree.scan(columnKey, KeySerializer.equalityScanEnd(columnKey))
+        while (iter.hasNext()) {
+            val rid = KeySerializer.deserializeRid(iter.next().second)
+            if (rid != selfRid) return rid
+        }
+        return null
+    }
 
     /** INSERT 시 모든 관련 인덱스에 엔트리를 추가한다. */
     private fun maintainIndexesOnInsert(tableName: String, schema: Schema, tuple: Tuple, rid: RID) {

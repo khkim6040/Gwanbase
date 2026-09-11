@@ -158,6 +158,57 @@ class CatalogIndexTest {
         }
     }
 
+    @Test
+    fun `unique 인덱스 플래그 등록 및 기본값 false`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+
+        catalog.createIndex("idx_plain", "users", "name", rootPageId = 10).unique shouldBe false
+        catalog.createIndex("users_pkey", "users", "id", rootPageId = 11, unique = true).unique shouldBe true
+    }
+
+    @Test
+    fun `unique 플래그 영속화 후 재로드 시 보존`() {
+        val dbPath = tempDir.resolve("unique_persist_test.db")
+
+        val catalogPageId: Int
+        run {
+            val dm = DiskManager(dbPath)
+            val bpm = BufferPoolManager(dm, 64)
+            val catalog = Catalog.createNew(bpm)
+            catalogPageId = catalog.catalogPageId
+            catalog.createTable("users", userSchema)
+            catalog.createIndex("users_pkey", "users", "id", rootPageId = 10, unique = true)
+            catalog.createIndex("idx_name", "users", "name", rootPageId = 11)
+            bpm.flushAllPages()
+            dm.close()
+        }
+
+        run {
+            val dm = DiskManager(dbPath)
+            val bpm = BufferPoolManager(dm, 64)
+            val catalog = Catalog.load(bpm, catalogPageId)
+            catalog.getIndex("users_pkey")!!.unique shouldBe true
+            catalog.getIndex("idx_name")!!.unique shouldBe false
+            dm.close()
+        }
+    }
+
+    @Test
+    fun `테이블 삭제 시 해당 테이블의 인덱스도 제거`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.createTable("orders", userSchema)
+        catalog.createIndex("users_pkey", "users", "id", rootPageId = 10, unique = true)
+        catalog.createIndex("orders_pkey", "orders", "id", rootPageId = 11, unique = true)
+
+        catalog.dropTable("users")
+
+        catalog.getIndex("users_pkey").shouldBeNull()
+        catalog.getIndexesForTable("users").shouldBeEmpty()
+        catalog.getIndex("orders_pkey").shouldNotBeNull()
+    }
+
     // --- TableStats / ColumnStats 테스트 ---
 
     @Test

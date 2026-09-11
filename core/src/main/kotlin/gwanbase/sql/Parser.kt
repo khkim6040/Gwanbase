@@ -58,8 +58,12 @@ class Parser(private val tokens: List<Token>) {
         expect(TokenType.CREATE, "CREATE 키워드가 필요하다")
         return when (peek().type) {
             TokenType.TABLE -> parseCreateTableBody()
-            TokenType.INDEX -> parseCreateIndex()
-            else -> throw ParseException("CREATE 뒤에 TABLE 또는 INDEX가 필요하다", peek().position)
+            TokenType.INDEX -> parseCreateIndex(unique = false)
+            TokenType.UNIQUE -> {
+                advance() // UNIQUE 소비
+                parseCreateIndex(unique = true)
+            }
+            else -> throw ParseException("CREATE 뒤에 TABLE, INDEX 또는 UNIQUE INDEX가 필요하다", peek().position)
         }
     }
 
@@ -87,18 +91,38 @@ class Parser(private val tokens: List<Token>) {
     /**
      * 컬럼 정의를 파싱한다.
      *
-     * 문법: name datatype [NOT NULL]
+     * 문법: name datatype { NOT NULL | UNIQUE | PRIMARY KEY }*
+     *
+     * 컬럼 제약은 순서 무관하게 반복될 수 있다 (PostgreSQL `column_constraint`와 동일).
+     * - https://www.postgresql.org/docs/current/sql-createtable.html
      */
     private fun parseColumnDef(): ColumnDef {
         val name = expectIdentifier("컬럼 이름이 필요하다")
         val dataType = parseDataType()
         var nullable = true
-        if (peek().type == TokenType.NOT) {
-            advance() // NOT 소비
-            expect(TokenType.NULL, "NOT 뒤에 NULL이 필요하다")
-            nullable = false
+        var unique = false
+        var primaryKey = false
+        while (true) {
+            when (peek().type) {
+                TokenType.NOT -> {
+                    advance() // NOT 소비
+                    expect(TokenType.NULL, "NOT 뒤에 NULL이 필요하다")
+                    nullable = false
+                }
+                TokenType.UNIQUE -> {
+                    advance()
+                    unique = true
+                }
+                TokenType.PRIMARY -> {
+                    advance()
+                    expect(TokenType.KEY, "PRIMARY 뒤에 KEY가 필요하다")
+                    primaryKey = true
+                    nullable = false
+                }
+                else -> break
+            }
         }
-        return ColumnDef(name, dataType, nullable)
+        return ColumnDef(name, dataType, nullable, unique, primaryKey)
     }
 
     /**
@@ -145,8 +169,10 @@ class Parser(private val tokens: List<Token>) {
      * CREATE INDEX 문을 파싱한다.
      *
      * 문법: INDEX indexName ON tableName (columnName)
+     *
+     * @param unique 앞에 UNIQUE 키워드가 있었는지 여부
      */
-    private fun parseCreateIndex(): Statement.CreateIndex {
+    private fun parseCreateIndex(unique: Boolean): Statement.CreateIndex {
         expect(TokenType.INDEX, "INDEX 키워드가 필요하다")
         val indexName = expectIdentifier("인덱스 이름이 필요하다")
         expect(TokenType.ON, "ON 키워드가 필요하다")
@@ -154,7 +180,7 @@ class Parser(private val tokens: List<Token>) {
         expect(TokenType.LPAREN, "'(' 가 필요하다")
         val columnName = expectIdentifier("컬럼 이름이 필요하다")
         expect(TokenType.RPAREN, "')' 가 필요하다")
-        return Statement.CreateIndex(indexName, tableName, columnName)
+        return Statement.CreateIndex(indexName, tableName, columnName, unique)
     }
 
     // ── DROP (TABLE | INDEX) ──

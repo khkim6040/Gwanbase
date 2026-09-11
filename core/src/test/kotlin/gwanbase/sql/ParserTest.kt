@@ -367,6 +367,52 @@ class ParserTest {
         stmt shouldBe Statement.Begin
     }
 
+    @Test
+    fun `CREATE TABLE PRIMARY KEY 컬럼 제약`() {
+        val stmt = parse("CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50));")
+        stmt.shouldBeInstanceOf<Statement.CreateTable>()
+        stmt.columns[0].primaryKey shouldBe true
+        stmt.columns[0].unique shouldBe false
+        stmt.columns[0].nullable shouldBe false
+        stmt.columns[1].primaryKey shouldBe false
+    }
+
+    @Test
+    fun `CREATE TABLE UNIQUE 컬럼 제약`() {
+        val stmt = parse("CREATE TABLE users (id INT, email VARCHAR(100) UNIQUE);")
+        stmt.shouldBeInstanceOf<Statement.CreateTable>()
+        stmt.columns[1].unique shouldBe true
+        stmt.columns[1].primaryKey shouldBe false
+        stmt.columns[1].nullable shouldBe true
+    }
+
+    @Test
+    fun `CREATE TABLE 컬럼 제약은 순서 무관`() {
+        val stmt = parse("CREATE TABLE t (a INT UNIQUE NOT NULL, b INT NOT NULL UNIQUE);")
+        stmt.shouldBeInstanceOf<Statement.CreateTable>()
+        stmt.columns[0].unique shouldBe true
+        stmt.columns[0].nullable shouldBe false
+        stmt.columns[1].unique shouldBe true
+        stmt.columns[1].nullable shouldBe false
+    }
+
+    @Test
+    fun `PRIMARY 뒤에 KEY 없으면 파싱 오류`() {
+        shouldThrow<ParseException> { parse("CREATE TABLE t (id INT PRIMARY);") }
+    }
+
+    @Test
+    fun `CREATE UNIQUE INDEX 파싱`() {
+        val stmt = parse("CREATE UNIQUE INDEX idx_email ON users (email);")
+        stmt shouldBe Statement.CreateIndex("idx_email", "users", "email", unique = true)
+    }
+
+    @Test
+    fun `CREATE INDEX 기본은 unique false`() {
+        val stmt = parse("CREATE INDEX idx_age ON users (age);")
+        stmt.shouldBeInstanceOf<Statement.CreateIndex>().unique shouldBe false
+    }
+
     // ── CREATE INDEX / DROP INDEX / ANALYZE / EXPLAIN ──
 
     @Test

@@ -97,7 +97,7 @@ class SqlExecutor(
             is Statement.Commit -> error("COMMIT은 DatabaseSession에서 처리한다")
             is Statement.Rollback -> error("ROLLBACK은 DatabaseSession에서 처리한다")
             is Statement.CreateIndex -> {
-                database.createIndex(stmt.indexName, stmt.tableName, stmt.columnName)
+                database.createIndex(stmt.indexName, stmt.tableName, stmt.columnName, stmt.unique)
                 ExecuteResult.IndexCreated(stmt.indexName)
             }
             is Statement.DropIndex -> {
@@ -125,6 +125,10 @@ class SqlExecutor(
 
     /**
      * CREATE TABLE 문을 실행한다.
+     *
+     * PRIMARY KEY / UNIQUE 컬럼 제약은 유일 인덱스로 구현한다. 인덱스 이름은 PostgreSQL 규칙
+     * (`{table}_pkey`, `{table}_{column}_key`)을 따른다.
+     * - https://www.postgresql.org/docs/current/ddl-constraints.html
      */
     private fun executeCreateTable(stmt: Statement.CreateTable): ExecuteResult.Created {
         val columns = stmt.columns.map { colDef ->
@@ -137,6 +141,13 @@ class SqlExecutor(
         }
         val schema = Schema(columns)
         database.createTable(stmt.tableName, schema)
+        for (colDef in stmt.columns) {
+            if (colDef.primaryKey) {
+                database.createIndex("${stmt.tableName}_pkey", stmt.tableName, colDef.name, unique = true)
+            } else if (colDef.unique) {
+                database.createIndex("${stmt.tableName}_${colDef.name}_key", stmt.tableName, colDef.name, unique = true)
+            }
+        }
         return ExecuteResult.Created(stmt.tableName)
     }
 
