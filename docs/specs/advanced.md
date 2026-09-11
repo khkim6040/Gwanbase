@@ -1,7 +1,7 @@
 # Gwanbase 고도화 로드맵
 
 각 Phase MVP 이후 PostgreSQL internals를 참고하여 단계적으로 고도화할 항목을
-정리한다. 각 항목은 독립적으로 추가 가능하며, 영역별로 분류했다.
+정리한다. 각 항목은 독립적으로 추가 가능하며, 영역별로 분류했다. 완료된 항목은 ✅로 표시한다.
 
 ---
 
@@ -224,6 +224,72 @@ Thread-per-connection에서 비동기 I/O 모델로 전환.
 
 ---
 
+## Constraints & Error Semantics 고도화
+
+실제 애플리케이션이 DB에서 마주치는 에러(중복 키, 데드락, 락 타임아웃 등)를
+Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코드로 클라이언트에
+전달되어 JDBC의 `SQLException.getSQLState()`로 분기할 수 있어야 한다.
+
+### 17. SQLSTATE 매핑 ✅
+
+코어 예외 타입을 `ConnectionHandler.sqlStateOf()`에서 SQLSTATE로 변환한다.
+새 에러를 추가할 때는 코어에 예외 타입을 정의하고 이 표에 한 줄을 더한다.
+
+| 예외 | SQLSTATE | 의미 |
+|------|----------|------|
+| `ParseException` | 42601 | syntax_error |
+| `BindException` | 42000 | syntax_error_or_access_rule_violation (세분화 전 임시) |
+| `DeadlockException` | 40P01 | deadlock_detected |
+| 그 외 | XX000 | internal_error |
+| (트랜잭션 실패 상태) | 25P02 | in_failed_sql_transaction — 기존 구현 |
+
+- 후속: `BindException`을 undefined_table(42P01), undefined_column(42703),
+  duplicate_table(42P07), not_null_violation(23502) 등으로 세분화.
+  현재 Binder가 NOT NULL 검사까지 담당하므로 제약 위반과 문법 오류가 한 타입에 섞여 있다.
+- PostgreSQL: `src/backend/utils/errcodes.txt`, `ereport(ERROR, errcode(...))`
+
+### 18. 데이터 예외 (Class 22)
+
+| SQLSTATE | 에러 | 재현 |
+|----------|------|------|
+| 22001 | string_data_right_truncation | `VARCHAR(n)` 길이 초과 INSERT |
+| 22012 | division_by_zero | `SELECT x / 0` |
+| 22003 | numeric_value_out_of_range | INT 오버플로 |
+
+- `ExpressionEvaluator`·`SqlExecutor`에 검사 한 곳씩 추가하는 수준.
+
+### 19. 락 타임아웃 (55P03)
+
+- 현재 `LockManager`는 `latch.await()`로 무한 대기한다.
+- 세션별 `lock_timeout`을 두고 `await(timeout)` 초과 시 `LockTimeoutException` → 55P03.
+- PostgreSQL: `lock_timeout` GUC, `SELECT ... FOR UPDATE NOWAIT`
+- MySQL: `innodb_lock_wait_timeout` (기본 50초), 에러 1205
+
+### 20. UNIQUE / PRIMARY KEY (23505)
+
+- Parser: `CREATE TABLE ... (id INT PRIMARY KEY, email VARCHAR(100) UNIQUE)`,
+  `CREATE UNIQUE INDEX`
+- Catalog: `IndexInfo.unique` 플래그
+- 실행기: INSERT/UPDATE 시 인덱스 조회로 중복 검사 → `UniqueViolationException`
+- 동시성: 두 트랜잭션이 같은 키를 동시에 삽입하는 경우를 다뤄야 한다.
+  PostgreSQL은 B-Tree 페이지 잠금 + 미커밋 튜플 대기로 해결한다.
+- PostgreSQL: `_bt_check_unique()` in `src/backend/access/nbtree/nbtinsert.c`
+
+### 21. FOREIGN KEY / CHECK (23503, 23514)
+
+- UNIQUE 위에 얹힌다. FK는 부모 테이블의 UNIQUE 인덱스를 참조한다.
+- INSERT 자식 → 부모 존재 확인, DELETE 부모 → 자식 존재 확인(RESTRICT만 MVP).
+- CHECK는 `ExpressionEvaluator`로 INSERT/UPDATE 시 평가.
+- PostgreSQL: FK는 트리거(`RI_FKey_check_ins`)로 구현된다.
+
+### 22. Serialization Failure (40001)
+
+- 2PL에서는 발생하지 않는다. write-write 충돌은 대기 또는 데드락으로 해소된다.
+- MVCC + Snapshot Isolation 도입 후에야 재현 가능. 별도 Phase급 작업.
+- PostgreSQL: `heap_update()`의 `HeapTupleUpdated` 처리, SSI(`predicate.c`)
+
+---
+
 ## 우선순위 가이드
 
 ### Query Optimizer
@@ -255,9 +321,21 @@ Thread-per-connection에서 비동기 I/O 모델로 전환.
 | 8 | NIO | 대규모 동시 접속 |
 | 9 | NOTIFY/LISTEN | 부가 기능 |
 
+### Constraints & Error Semantics
+
+| 순위 | 항목 | 이유 |
+|------|------|------|
+| 1 | SQLSTATE 매핑 ✅ | 이후 모든 에러의 전달 경로 |
+| 2 | 데이터 예외 | 검사 한 곳씩, 낮은 비용 |
+| 3 | 락 타임아웃 | 무한 대기 제거, 운영 안정성 |
+| 4 | UNIQUE / PK | 중복 키 에러 — 실무에서 가장 빈번한 재시도 대상 |
+| 5 | FK / CHECK | UNIQUE 위에 구축 |
+| 6 | Serialization Failure | MVCC 선행 필요 |
+
 ## 참고 자료
 
 - PostgreSQL 소스: `src/backend/optimizer/`, `src/backend/executor/`, `src/backend/tcop/`
+- [PostgreSQL Error Codes (Appendix A)](https://www.postgresql.org/docs/current/errcodes-appendix.html)
 - *The Internals of PostgreSQL* (Hironobu Suzuki) — 무료 온라인, 옵티마이저/프로토콜 장
 - CMU 15-721 (Andy Pavlo) — 고급 주제: 비용 모델, 적응형 실행
 - *Access Path Selection in a Relational Database Management System* (Selinger et al., 1979) — System R 옵티마이저 원논문
