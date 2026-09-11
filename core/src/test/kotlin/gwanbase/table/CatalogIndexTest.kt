@@ -194,6 +194,21 @@ class CatalogIndexTest {
         }
     }
 
+    @Test
+    fun `테이블 삭제 시 해당 테이블의 인덱스도 제거`() {
+        val (catalog, _, _) = createCatalog()
+        catalog.createTable("users", userSchema)
+        catalog.createTable("orders", userSchema)
+        catalog.createIndex("users_pkey", "users", "id", rootPageId = 10, unique = true)
+        catalog.createIndex("orders_pkey", "orders", "id", rootPageId = 11, unique = true)
+
+        catalog.dropTable("users")
+
+        catalog.getIndex("users_pkey").shouldBeNull()
+        catalog.getIndexesForTable("users").shouldBeEmpty()
+        catalog.getIndex("orders_pkey").shouldNotBeNull()
+    }
+
     // --- TableStats / ColumnStats 테스트 ---
 
     @Test

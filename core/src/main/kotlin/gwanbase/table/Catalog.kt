@@ -112,10 +112,13 @@ class Catalog(
     /** 모든 테이블 목록 */
     fun listTables(): List<TableInfo> = tables.toList()
 
-    /** 테이블을 삭제한다. */
+    /** 테이블을 삭제한다. 해당 테이블에 속한 인덱스도 함께 제거한다. */
     fun dropTable(name: String): Boolean {
         val removed = tables.removeAll { it.name == name }
-        if (removed) flush()
+        if (removed) {
+            indexes.removeAll { it.tableName == name }
+            flush()
+        }
         return removed
     }
 
