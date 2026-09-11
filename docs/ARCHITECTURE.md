@@ -57,7 +57,7 @@ ConnectionHandler (P8)     Simple Query 메시지 수신 → 세션에 위임, �
        ├─ Operator.next() (P4) Volcano pull 실행
        │    ├─ ExpressionEvaluator  산술·비교·NULL 3값 논리 (DataException)
        │    └─ LockManager (P6)     RID 단위 S/X 잠금 (Deadlock/LockTimeout)
-       └─ Database/HeapFile (P2) 튜플 읽기·쓰기
+       └─ Database/HeapFile (P2) 튜플 읽기·쓰기 (유일 제약 검사 → UniqueViolation)
             └─ WalCallback → LogManager (P5)  변경 전 WAL 기록
                  └─ BufferPoolManager → DiskManager (P1)
 ```
@@ -74,6 +74,7 @@ ConnectionHandler (P8)     Simple Query 메시지 수신 → 세션에 위임, �
 | `DataException` | 22xxx (필드) | ExpressionEvaluator, SqlExecutor.coerceValue |
 | `DeadlockException` | 40P01 | LockManager |
 | `LockTimeoutException` | 55P03 | LockManager |
+| `UniqueViolationException` | 23505 | Database.checkUniqueConstraints |
 | 그 외 | XX000 | — |
 
 상세는 `docs/specs/advanced.md`의 "Constraints & Error Semantics" 참조.

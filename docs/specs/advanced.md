@@ -275,15 +275,56 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 - PostgreSQL: `lock_timeout` GUC(기본 0=무한), `SELECT ... FOR UPDATE NOWAIT`
 - MySQL: `innodb_lock_wait_timeout` (기본 50초), 에러 1205
 
-### 20. UNIQUE / PRIMARY KEY (23505)
+### 20. UNIQUE / PRIMARY KEY (23505) ✅
 
-- Parser: `CREATE TABLE ... (id INT PRIMARY KEY, email VARCHAR(100) UNIQUE)`,
-  `CREATE UNIQUE INDEX`
-- Catalog: `IndexInfo.unique` 플래그
-- 실행기: INSERT/UPDATE 시 인덱스 조회로 중복 검사 → `UniqueViolationException`
-- 동시성: 두 트랜잭션이 같은 키를 동시에 삽입하는 경우를 다뤄야 한다.
-  PostgreSQL은 B-Tree 페이지 잠금 + 미커밋 튜플 대기로 해결한다.
-- PostgreSQL: `_bt_check_unique()` in `src/backend/access/nbtree/nbtinsert.c`
+**PostgreSQL 방식**
+
+- UNIQUE / PRIMARY KEY 제약은 **유일 B-Tree 인덱스**로 구현된다. 제약을 선언하면
+  `{table}_pkey`, `{table}_{column}_key` 인덱스가 자동 생성되고, 카탈로그에는
+  `pg_index.indisunique` / `indisprimary` 플래그와 `pg_constraint` 행이 남는다.
+- 검사 시점은 **힙 삽입 후 인덱스 삽입 시점**이다. `heap_insert()` →
+  `ExecInsertIndexTuples()` → `_bt_doinsert()` → `_bt_check_unique()`. 위반 시
+  `ERRCODE_UNIQUE_VIOLATION`(23505)으로 트랜잭션이 abort되고, 이미 쓰인 힙 튜플은
+  dead 버전으로 남아 VACUUM이 정리한다.
+- 동시 삽입: `_bt_check_unique()`가 같은 키의 튜플을 찾으면 그 튜플의 삽입 트랜잭션이
+  진행 중인지 확인하고, 진행 중이면 그 xid를 반환해 `_bt_doinsert()`가
+  `XactLockTableWait()`로 **상대 트랜잭션의 종료를 기다린 뒤 재검사**한다. 상대가
+  abort하면 삽입이 성공하고, commit하면 23505다. 원자성과 대기는 모두 인덱스 AM 안에서
+  처리된다.
+- NULL은 서로 다른 값으로 취급한다 (`NULLS DISTINCT` 기본, PostgreSQL 15부터
+  `NULLS NOT DISTINCT` 선택 가능).
+- `CREATE UNIQUE INDEX`로 기존 데이터를 빌드할 때는 정렬 후 인접 중복을 검사한다
+  (`nbtsort.c`).
+
+**Gwanbase 구현**
+
+| 항목 | 구현 | PostgreSQL과의 차이 |
+|------|------|---------------------|
+| 제약의 실체 | `IndexInfo.unique` + B+Tree (`Catalog.kt`) | `indisprimary`, `pg_constraint`는 생략. FK 작업 시 필요해지면 추가 |
+| 파서 | `ColumnDef.unique / primaryKey`, `CreateIndex.unique`. 컬럼 제약은 순서 무관 반복 | 테이블 수준 제약(`PRIMARY KEY (a, b)`)은 복합 인덱스 이후로 미룸 |
+| 인덱스 명명 | `{table}_pkey`, `{table}_{column}_key` (`SqlExecutor.executeCreateTable`) | 동일 |
+| 검사 시점 | **힙 변경 전** `Database.checkUniqueConstraints()` | **의도적 차이.** MVCC/VACUUM이 없어 실패한 힙 튜플을 dead 버전으로 남길 수 없다. 검사를 선행하면 힙·다른 인덱스에 반쯤 쓰인 상태가 남지 않아 undo도 불필요 |
+| 검사 방법 | `tree.scan(columnKey, equalityScanEnd)`로 접두사 범위 조회, UPDATE는 자기 RID 제외 | 기존 복합 키(`columnKey + rid`) 구조를 그대로 사용 |
+| 동시 삽입 | `DatabaseSession.waitForConflictingRow()` — 충돌 RID에 **S 잠금 획득으로 상대 트랜잭션 종료를 대기** 후 1회 재시도 | xid 대기 대신 행 잠금 대기. Strict 2PL에서는 잠금이 트랜잭션 종료까지 유지되므로 등가. 데드락은 기존 감지기가 40P01로 처리 |
+| 검사–삽입 원자성 | 보장하지 않음 (`ponytail:` 주석) | B+Tree 자체가 아직 동시 쓰기에 안전하지 않은 기존 한계. B+Tree 래치 도입 시 함께 해결 |
+| NULL | 검사 제외 (`NULLS DISTINCT`) | 동일 |
+| 에러 | `UniqueViolationException(indexName, conflictingRid)` → 23505, 메시지 `duplicate key value violates unique constraint "..."` | 동일. 예외가 `table` 패키지에 있는 이유는 모듈 의존 방향(`sql → table`) 때문 |
+| `CREATE UNIQUE INDEX` 빌드 | 스캔하며 트리 조회로 검사, 위반 시 Catalog 미등록 | 정렬 기반 인접 검사 대신 단순화. 결과 동일 |
+
+- 부수 수정: `Catalog.dropTable()`이 해당 테이블의 인덱스를 함께 제거한다. 이전에는
+  고아 인덱스가 남아 `DROP TABLE` 후 같은 이름의 PK 테이블 재생성이 실패했다.
+- Catalog 직렬화 포맷에 인덱스별 `unique` 1바이트가 추가되어 이전 파일과 호환되지 않는다.
+
+**참고 자료**
+
+- [PostgreSQL 문서: Constraints](https://www.postgresql.org/docs/current/ddl-constraints.html) — UNIQUE/PK가 유일 인덱스로 구현됨, NULLS DISTINCT
+- [PostgreSQL 문서: Unique Indexes](https://www.postgresql.org/docs/current/indexes-unique.html)
+- [PostgreSQL 문서: pg_index](https://www.postgresql.org/docs/current/catalog-pg-index.html) — `indisunique`, `indisprimary`
+- [PostgreSQL 문서: Error Codes](https://www.postgresql.org/docs/current/errcodes-appendix.html) — 23505 `unique_violation`
+- [`src/backend/executor/execIndexing.c`](https://github.com/postgres/postgres/blob/master/src/backend/executor/execIndexing.c) — 파일 상단 주석이 힙 삽입 → 인덱스 삽입 순서와 동시 삽입 처리를 설명
+- [`src/backend/access/nbtree/nbtinsert.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtinsert.c) — `_bt_check_unique()`, `_bt_doinsert()`의 `XactLockTableWait()`
+- [`src/backend/access/nbtree/nbtsort.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtsort.c) — 인덱스 빌드 시 유일성 검사
+- [`src/backend/access/nbtree/README`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/README) — B-Tree 동시성 설계 (Lehman & Yao)
 
 ### 21. FOREIGN KEY / CHECK (23503, 23514)
 
@@ -338,7 +379,7 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 | 1 | SQLSTATE 매핑 ✅ | 이후 모든 에러의 전달 경로 |
 | 2 | 데이터 예외 ✅ | 검사 한 곳씩, 낮은 비용 |
 | 3 | 락 타임아웃 ✅ | 무한 대기 제거, 운영 안정성 |
-| 4 | UNIQUE / PK | 중복 키 에러 — 실무에서 가장 빈번한 재시도 대상 |
+| 4 | UNIQUE / PK ✅ | 중복 키 에러 — 실무에서 가장 빈번한 재시도 대상 |
 | 5 | FK / CHECK | UNIQUE 위에 구축 |
 | 6 | Serialization Failure | MVCC 선행 필요 |
 
