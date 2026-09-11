@@ -22,6 +22,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   따를 수 없는 부분은 **"차이 + 이유"** 를 명시한다.
 - 항목 완료 시 스펙 문서(`docs/specs/advanced.md` 등)의 해당 항목에 다음을 채운다:
   참조 DB 방식 / Gwanbase 구현 / 차이와 이유 / **참고 자료(공식 문서 URL, 소스 파일·함수명)**.
+- 코드 주석(KDoc)에서 다른 DB의 동작을 언급할 때는 함수명만 적지 말고 해당 문서·소스의
+  URL을 직접 링크한다.
 - 레퍼런스 없는 설계 결정은 미완성으로 본다.
 
 ## 기술 스택
