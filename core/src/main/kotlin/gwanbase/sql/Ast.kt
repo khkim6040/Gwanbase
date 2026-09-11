@@ -51,8 +51,13 @@ sealed class Statement {
     /** 트랜잭션 롤백. */
     data object Rollback : Statement()
 
-    /** CREATE INDEX 문. */
-    data class CreateIndex(val indexName: String, val tableName: String, val columnName: String) : Statement()
+    /** CREATE [UNIQUE] INDEX 문. */
+    data class CreateIndex(
+        val indexName: String,
+        val tableName: String,
+        val columnName: String,
+        val unique: Boolean = false,
+    ) : Statement()
 
     /** DROP INDEX 문. */
     data class DropIndex(val indexName: String) : Statement()
@@ -81,11 +86,15 @@ sealed class FromClause {
 
 /**
  * 컬럼 정의 (CREATE TABLE에서 사용).
+ *
+ * PRIMARY KEY는 NOT NULL + UNIQUE를 함축하므로 [primaryKey]가 true면 [nullable]은 false다.
  */
 data class ColumnDef(
     val name: String,
     val dataType: SqlDataType,
     val nullable: Boolean = true,
+    val unique: Boolean = false,
+    val primaryKey: Boolean = false,
 )
 
 /**
