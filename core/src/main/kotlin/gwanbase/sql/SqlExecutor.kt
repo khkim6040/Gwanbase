@@ -128,6 +128,7 @@ class SqlExecutor(
      *
      * PRIMARY KEY / UNIQUE 컬럼 제약은 유일 인덱스로 구현한다. 인덱스 이름은 PostgreSQL 규칙
      * (`{table}_pkey`, `{table}_{column}_key`)을 따른다.
+     * - https://www.postgresql.org/docs/current/ddl-constraints.html
      */
     private fun executeCreateTable(stmt: Statement.CreateTable): ExecuteResult.Created {
         val columns = stmt.columns.map { colDef ->

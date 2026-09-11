@@ -29,8 +29,9 @@ data class ColumnStats(
 /**
  * 인덱스 메타데이터.
  *
- * @param unique 유일 인덱스 여부. UNIQUE/PRIMARY KEY 제약은 유일 인덱스로 구현된다
- *   (PostgreSQL `pg_index.indisunique`와 동일한 역할).
+ * @param unique 유일 인덱스 여부. UNIQUE/PRIMARY KEY 제약은 유일 인덱스로 구현된다.
+ *   PostgreSQL `pg_index.indisunique`와 같은 역할이다.
+ *   https://www.postgresql.org/docs/current/catalog-pg-index.html
  */
 data class IndexInfo(
     val indexId: Int,

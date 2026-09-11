@@ -220,7 +220,8 @@ class Database private constructor(
      *
      * 기존 테이블 데이터를 스캔하여 B+Tree를 구축한 뒤 Catalog에 등록한다.
      * [unique]가 true면 빌드 중 중복 키를 발견하는 즉시 [UniqueViolationException]을 던지고
-     * Catalog에는 등록하지 않는다 (PostgreSQL `nbtsort.c`의 빌드 시 유일성 검사와 동일한 결과).
+     * Catalog에는 등록하지 않는다. PostgreSQL은 정렬 후 인접 중복을 검사하지만 결과는 같다.
+     * - https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtsort.c
      */
     fun createIndex(indexName: String, tableName: String, columnName: String, unique: Boolean = false) {
         checkOpen()
@@ -332,7 +333,12 @@ class Database private constructor(
      * 힙과 인덱스를 변경하기 **전에** 호출하여, 위반 시 반쯤 쓰인 상태가 남지 않게 한다.
      * PostgreSQL은 힙 삽입 후 인덱스 삽입 시점(`_bt_check_unique`)에 검사하고 실패한 힙 튜플은
      * dead 버전으로 남겨 VACUUM이 정리하지만, Gwanbase는 MVCC가 없어 검사를 선행한다.
-     * NULL 값은 검사하지 않는다 (SQL 표준 `NULLS DISTINCT`).
+     * NULL 값은 검사하지 않는다 (`NULLS DISTINCT`).
+     * - https://github.com/postgres/postgres/blob/master/src/backend/executor/execIndexing.c
+     *   (`ExecInsertIndexTuples`: 힙 삽입 후 호출됨)
+     * - https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtinsert.c
+     *   (`_bt_check_unique`)
+     * - https://www.postgresql.org/docs/current/indexes-unique.html (NULL 처리)
      *
      * @param selfRid UPDATE 시 자기 자신의 RID. 같은 행의 기존 엔트리는 충돌로 보지 않는다.
      */

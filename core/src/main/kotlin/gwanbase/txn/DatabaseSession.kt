@@ -123,9 +123,15 @@ class DatabaseSession(
      * 충돌 행이 다른 트랜잭션의 미커밋 삽입이라면 그 행에는 X 잠금이 걸려 있으므로,
      * S 잠금 요청은 상대가 commit/abort할 때까지 블록된다. 상대가 abort하면 행이 사라져
      * 재시도가 성공하고, commit하면 재시도에서 다시 위반이 발생해 그대로 전파된다.
-     * PostgreSQL `_bt_check_unique()`가 `XactLockTableWait()`로 삽입 트랜잭션의 종료를
-     * 기다리는 것과 같은 의미다. 충돌 행을 자기 자신이 잠그고 있으면 S 잠금이 즉시 반환되어
-     * 재시도가 곧바로 다시 실패한다.
+     * 충돌 행을 자기 자신이 잠그고 있으면 S 잠금이 즉시 반환되어 재시도가 곧바로 다시 실패한다.
+     *
+     * PostgreSQL은 `_bt_check_unique()`가 충돌 튜플의 삽입 xid를 돌려주면 `_bt_doinsert()`가
+     * `XactLockTableWait()`로 그 트랜잭션의 종료를 기다린 뒤 재검사한다. 행 잠금 대신 xid를
+     * 기다린다는 점만 다르고 의미는 같다.
+     * - https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtinsert.c
+     *   (`_bt_check_unique`, `_bt_doinsert`)
+     * - https://github.com/postgres/postgres/blob/master/src/backend/executor/execIndexing.c
+     *   (파일 상단 주석: 동시 삽입 시 유일성 보장 방식)
      */
     private fun <T> waitForConflictingRow(tableName: String, action: () -> T): T {
         return try {

@@ -93,7 +93,8 @@ class Parser(private val tokens: List<Token>) {
      *
      * 문법: name datatype { NOT NULL | UNIQUE | PRIMARY KEY }*
      *
-     * 컬럼 제약은 순서 무관하게 반복될 수 있다 (PostgreSQL column_constraint와 동일).
+     * 컬럼 제약은 순서 무관하게 반복될 수 있다 (PostgreSQL `column_constraint`와 동일).
+     * - https://www.postgresql.org/docs/current/sql-createtable.html
      */
     private fun parseColumnDef(): ColumnDef {
         val name = expectIdentifier("컬럼 이름이 필요하다")
