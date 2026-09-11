@@ -358,7 +358,7 @@ class Database private constructor(
 
     /** [columnKey]와 같은 컬럼 값을 가진 엔트리 중 [selfRid]가 아닌 첫 RID를 반환한다. 없으면 null. */
     private fun findConflictingRid(tree: BPlusTree, columnKey: ByteArray, selfRid: RID?): RID? {
-        // ponytail: 검사와 삽입 사이에 다른 스레드가 끼어들 수 있다. B+Tree 자체가 아직 동시 쓰기에
+        // 검사와 삽입 사이에 다른 스레드가 끼어들 수 있다. B+Tree 자체가 아직 동시 쓰기에
         // 안전하지 않으므로 같은 한계로 두고, B+Tree 래치 도입 시 함께 해결한다.
         val iter = tree.scan(columnKey, KeySerializer.equalityScanEnd(columnKey))
         while (iter.hasNext()) {
