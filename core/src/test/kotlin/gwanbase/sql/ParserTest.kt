@@ -397,6 +397,47 @@ class ParserTest {
     }
 
     @Test
+    fun `CREATE TABLE REFERENCES 컬럼 제약`() {
+        val stmt = parse("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT REFERENCES users(id));")
+        stmt.shouldBeInstanceOf<Statement.CreateTable>()
+        stmt.columns[1].references shouldBe ForeignKeyRef("users", "id")
+        stmt.columns[0].references shouldBe null
+    }
+
+    @Test
+    fun `REFERENCES 참조 컬럼 생략 시 null`() {
+        val stmt = parse("CREATE TABLE orders (user_id INT REFERENCES users);")
+        stmt.shouldBeInstanceOf<Statement.CreateTable>()
+        stmt.columns[0].references shouldBe ForeignKeyRef("users", null)
+    }
+
+    @Test
+    fun `CREATE TABLE CHECK 컬럼 제약`() {
+        val stmt = parse("CREATE TABLE t (age INT CHECK (age >= 0 AND age < 200));")
+        stmt.shouldBeInstanceOf<Statement.CreateTable>()
+        stmt.columns[0].check shouldBe Expression.BinaryOp(
+            Expression.BinaryOp(Expression.ColumnRef(null, "age"), BinaryOperator.GTE, Expression.IntLiteral(0)),
+            BinaryOperator.AND,
+            Expression.BinaryOp(Expression.ColumnRef(null, "age"), BinaryOperator.LT, Expression.IntLiteral(200)),
+        )
+    }
+
+    @Test
+    fun `CHECK 뒤에 괄호 없으면 파싱 오류`() {
+        shouldThrow<ParseException> { parse("CREATE TABLE t (a INT CHECK a > 0);") }
+    }
+
+    @Test
+    fun `Expression toSql 왕복`() {
+        val sql = "(a >= 0 AND a < 200) OR (name = 'x''y' AND -b IS NOT NULL)"
+        val expr = Parser(Lexer("SELECT 1 FROM t WHERE $sql").tokenize()).parse()
+            .let { (it as Statement.Select).where!! }
+        val roundTrip = Parser(Lexer("SELECT 1 FROM t WHERE ${expr.toSql()}").tokenize()).parse()
+            .let { (it as Statement.Select).where!! }
+        roundTrip shouldBe expr
+    }
+
+    @Test
     fun `PRIMARY 뒤에 KEY 없으면 파싱 오류`() {
         shouldThrow<ParseException> { parse("CREATE TABLE t (id INT PRIMARY);") }
     }
