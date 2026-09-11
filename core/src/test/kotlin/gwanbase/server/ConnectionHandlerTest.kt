@@ -1,6 +1,9 @@
 package gwanbase.server
 
+import gwanbase.sql.BindException
+import gwanbase.sql.ParseException
 import gwanbase.table.Database
+import gwanbase.txn.DeadlockException
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import org.junit.jupiter.api.AfterEach
@@ -175,6 +178,34 @@ class ConnectionHandlerTest {
             sendQuery(out, "CREATE TABLE t (id INT NOT NULL)")
             val createMsgs = readUntilReady(reader)
             createMsgs.any { it is PgMessage.CommandComplete } shouldBe true
+
+            sendTerminate(out)
+        }
+        thread.join(3000)
+    }
+
+    @Test
+    fun `SQLSTATE 매핑 — 예외 타입별 코드 반환`() {
+        ConnectionHandler.sqlStateOf(ParseException("x", 0)) shouldBe "42601"
+        ConnectionHandler.sqlStateOf(BindException("x")) shouldBe "42000"
+        ConnectionHandler.sqlStateOf(DeadlockException(1)) shouldBe "40P01"
+        ConnectionHandler.sqlStateOf(IllegalStateException("x")) shouldBe "XX000"
+    }
+
+    @Test
+    fun `SQLSTATE 매핑 — 문법 오류 시 ErrorResponse code가 42601`() {
+        val (client, thread) = startHandler()
+        client.use { sock ->
+            val out = sock.getOutputStream()
+            val reader = PgMessageReader(sock.getInputStream())
+
+            sendStartup(out)
+            readUntilReady(reader)
+
+            sendQuery(out, "SELEC * FROM t")
+            val msgs = readUntilReady(reader)
+            val error = msgs.filterIsInstance<PgMessage.ErrorResponse>().single()
+            error.code shouldBe "42601"
 
             sendTerminate(out)
         }

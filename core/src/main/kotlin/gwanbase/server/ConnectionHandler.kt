@@ -1,8 +1,11 @@
 package gwanbase.server
 
+import gwanbase.sql.BindException
 import gwanbase.sql.ExecuteResult
+import gwanbase.sql.ParseException
 import gwanbase.table.Database
 import gwanbase.txn.DatabaseSession
+import gwanbase.txn.DeadlockException
 import mu.KotlinLogging
 import java.io.EOFException
 import java.net.Socket
@@ -107,7 +110,7 @@ class ConnectionHandler(
             writer.write(PgMessage.ErrorResponse(
                 severity = "ERROR",
                 message = e.message ?: "내부 오류",
-                code = "XX000",
+                code = sqlStateOf(e),
             ))
             writer.write(PgMessage.ReadyForQuery(currentTxnStatus()))
             writer.flush()
@@ -149,5 +152,20 @@ class ConnectionHandler(
         txnFailed -> 'E'
         inTransaction -> 'T'
         else -> 'I'
+    }
+
+    companion object {
+        /**
+         * 예외 타입을 PostgreSQL SQLSTATE 코드로 변환한다.
+         *
+         * 클라이언트(JDBC 등)가 `SQLException.getSQLState()`로 에러 종류를 분기할 수 있도록
+         * PostgreSQL과 동일한 코드를 사용한다. 매핑되지 않은 예외는 internal_error(XX000)로 취급한다.
+         */
+        internal fun sqlStateOf(e: Throwable): String = when (e) {
+            is ParseException -> "42601"    // syntax_error
+            is BindException -> "42000"     // syntax_error_or_access_rule_violation
+            is DeadlockException -> "40P01" // deadlock_detected
+            else -> "XX000"                 // internal_error
+        }
     }
 }
