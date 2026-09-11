@@ -237,7 +237,7 @@ class Database private constructor(
             val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
             val columnKey = KeySerializer.serializeKey(value, colType)
             if (unique) {
-                findConflictingRid(tree, columnKey, selfRid = null)?.let {
+                findRidByColumnKey(tree, columnKey, selfRid = null)?.let {
                     throw UniqueViolationException(indexName, it)
                 }
             }
@@ -274,6 +274,41 @@ class Database private constructor(
         }
         maintainIndexesOnInsert(tableName, info.schema, tuple, newRid)
         return newRid
+    }
+
+    /** 유일 인덱스에서 [value]를 키로 가진 행의 RID를 반환한다. 없으면 null. */
+    fun findRidByUniqueIndex(indexInfo: IndexInfo, value: Any): RID? {
+        checkOpen()
+        require(indexInfo.unique) { "인덱스 '${indexInfo.name}'은 유일 인덱스가 아니다" }
+        val schema = catalog.getTable(indexInfo.tableName)!!.schema
+        val colType = schema.column(schema.columnIndex(indexInfo.columnName)).type
+        val tree = BPlusTree(bpm, indexInfo.rootPageId)
+        return findRidByColumnKey(tree, KeySerializer.serializeKey(value, colType), selfRid = null)
+    }
+
+    /**
+     * [columnName]이 [value]인 행이 존재하는지 확인한다. 외래 키 RESTRICT 검사에 쓴다.
+     * 컬럼에 인덱스가 있으면 트리 조회, 없으면 순차 스캔한다.
+     *
+     * @param excludeRid 존재 여부에서 제외할 행 (자기 참조 테이블의 자기 자신)
+     */
+    fun existsRowWithValue(tableName: String, columnName: String, value: Any, excludeRid: RID? = null): Boolean {
+        checkOpen()
+        val info = catalog.getTable(tableName)
+            ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
+        val colIndex = info.schema.columnIndex(columnName)
+        val colType = info.schema.column(colIndex).type
+        val index = catalog.getIndexesForTable(tableName).firstOrNull { it.columnName == columnName }
+        if (index != null) {
+            val tree = BPlusTree(bpm, index.rootPageId)
+            return findRidByColumnKey(tree, KeySerializer.serializeKey(value, colType), excludeRid) != null
+        }
+        val iter = scanTable(tableName)
+        while (iter.hasNext()) {
+            val (rid, tuple) = iter.next()
+            if (rid != excludeRid && ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) == value) return true
+        }
+        return false
     }
 
     /** Catalog 인스턴스를 반환한다. Binder에서 스키마 검증용으로 사용한다. */
@@ -350,14 +385,14 @@ class Database private constructor(
             val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
             val columnKey = KeySerializer.serializeKey(value, colType)
             val tree = BPlusTree(bpm, indexInfo.rootPageId)
-            findConflictingRid(tree, columnKey, selfRid)?.let {
+            findRidByColumnKey(tree, columnKey, selfRid)?.let {
                 throw UniqueViolationException(indexInfo.name, it)
             }
         }
     }
 
     /** [columnKey]와 같은 컬럼 값을 가진 엔트리 중 [selfRid]가 아닌 첫 RID를 반환한다. 없으면 null. */
-    private fun findConflictingRid(tree: BPlusTree, columnKey: ByteArray, selfRid: RID?): RID? {
+    private fun findRidByColumnKey(tree: BPlusTree, columnKey: ByteArray, selfRid: RID?): RID? {
         // 검사와 삽입 사이에 다른 스레드가 끼어들 수 있다. B+Tree 자체가 아직 동시 쓰기에
         // 안전하지 않으므로 같은 한계로 두고, B+Tree 래치 도입 시 함께 해결한다.
         val iter = tree.scan(columnKey, KeySerializer.equalityScanEnd(columnKey))

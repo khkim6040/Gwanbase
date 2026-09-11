@@ -306,7 +306,7 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 | 검사 시점 | **힙 변경 전** `Database.checkUniqueConstraints()` | **의도적 차이.** MVCC/VACUUM이 없어 실패한 힙 튜플을 dead 버전으로 남길 수 없다. 검사를 선행하면 힙·다른 인덱스에 반쯤 쓰인 상태가 남지 않아 undo도 불필요 |
 | 검사 방법 | `tree.scan(columnKey, equalityScanEnd)`로 접두사 범위 조회, UPDATE는 자기 RID 제외 | 기존 복합 키(`columnKey + rid`) 구조를 그대로 사용 |
 | 동시 삽입 | `DatabaseSession.waitForConflictingRow()` — 충돌 RID에 **S 잠금 획득으로 상대 트랜잭션 종료를 대기** 후 1회 재시도 | xid 대기 대신 행 잠금 대기. Strict 2PL에서는 잠금이 트랜잭션 종료까지 유지되므로 등가. 데드락은 기존 감지기가 40P01로 처리 |
-| 검사–삽입 원자성 | 보장하지 않음 (`Database.findConflictingRid` 주석 참조) | B+Tree 자체가 아직 동시 쓰기에 안전하지 않은 기존 한계. B+Tree 래치 도입 시 함께 해결 |
+| 검사–삽입 원자성 | 보장하지 않음 (`Database.findRidByColumnKey` 주석 참조) | B+Tree 자체가 아직 동시 쓰기에 안전하지 않은 기존 한계. B+Tree 래치 도입 시 함께 해결 |
 | NULL | 검사 제외 (`NULLS DISTINCT`) | 동일 |
 | 에러 | `UniqueViolationException(indexName, conflictingRid)` → 23505, 메시지 `duplicate key value violates unique constraint "..."` | 동일. 예외가 `table` 패키지에 있는 이유는 모듈 의존 방향(`sql → table`) 때문 |
 | `CREATE UNIQUE INDEX` 빌드 | 스캔하며 트리 조회로 검사, 위반 시 Catalog 미등록 | 정렬 기반 인접 검사 대신 단순화. 결과 동일 |
