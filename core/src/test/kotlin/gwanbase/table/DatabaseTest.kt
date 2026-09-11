@@ -193,4 +193,139 @@ class DatabaseTest {
             Database.open(path)
         }
     }
+
+    // ── UNIQUE 제약 ──
+
+    private val emailSchema = Schema(
+        listOf(
+            Column("id", DataType.INT32),
+            Column("email", DataType.VARCHAR, maxLength = 100, nullable = true),
+        )
+    )
+
+    @Test
+    fun `unique 인덱스가 있는 컬럼에 중복 값 삽입 시 UniqueViolationException`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.createIndex("users_email_key", "users", "email", unique = true)
+            db.insertTuple("users", Tuple(emailSchema, arrayOf(1, "a@x.com")))
+
+            val e = assertThrows<UniqueViolationException> {
+                db.insertTuple("users", Tuple(emailSchema, arrayOf(2, "a@x.com")))
+            }
+            e.indexName shouldBe "users_email_key"
+            e.sqlState shouldBe "23505"
+        }
+    }
+
+    @Test
+    fun `unique 위반 삽입은 힙과 다른 인덱스에 흔적을 남기지 않는다`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.createIndex("idx_id", "users", "id")
+            db.createIndex("users_email_key", "users", "email", unique = true)
+            db.insertTuple("users", Tuple(emailSchema, arrayOf(1, "a@x.com")))
+
+            assertThrows<UniqueViolationException> {
+                db.insertTuple("users", Tuple(emailSchema, arrayOf(2, "a@x.com")))
+            }
+
+            db.getCatalog().getRowCount("users") shouldBe 1L
+            var count = 0
+            val iter = db.scanTable("users")
+            while (iter.hasNext()) { iter.next(); count++ }
+            count shouldBe 1
+            // id=2 인덱스 엔트리가 남아 있지 않아야 한다
+            val idTree = db.getIndexTree(db.getCatalog().getIndex("idx_id")!!)
+            val key = gwanbase.index.KeySerializer.serializeKey(2, DataType.INT32)
+            idTree.scan(key, gwanbase.index.KeySerializer.equalityScanEnd(key)).hasNext() shouldBe false
+        }
+    }
+
+    @Test
+    fun `일반 인덱스는 중복 값을 허용한다`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.createIndex("idx_email", "users", "email")
+            db.insertTuple("users", Tuple(emailSchema, arrayOf(1, "a@x.com")))
+            db.insertTuple("users", Tuple(emailSchema, arrayOf(2, "a@x.com")))
+            db.getCatalog().getRowCount("users") shouldBe 2L
+        }
+    }
+
+    @Test
+    fun `unique 인덱스는 NULL을 여러 번 허용한다`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.createIndex("users_email_key", "users", "email", unique = true)
+            db.insertTuple("users", Tuple(emailSchema, arrayOf(1, null)))
+            db.insertTuple("users", Tuple(emailSchema, arrayOf(2, null)))
+            db.getCatalog().getRowCount("users") shouldBe 2L
+        }
+    }
+
+    @Test
+    fun `삭제된 값은 다시 삽입할 수 있다`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.createIndex("users_email_key", "users", "email", unique = true)
+            val rid = db.insertTuple("users", Tuple(emailSchema, arrayOf(1, "a@x.com")))
+            db.deleteTuple("users", rid)
+            db.insertTuple("users", Tuple(emailSchema, arrayOf(2, "a@x.com")))
+        }
+    }
+
+    @Test
+    fun `updateTuple로 같은 행에 같은 값을 다시 쓰는 것은 허용`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.createIndex("users_email_key", "users", "email", unique = true)
+            val rid = db.insertTuple("users", Tuple(emailSchema, arrayOf(1, "a@x.com")))
+            val newRid = db.updateTuple("users", rid, Tuple(emailSchema, arrayOf(99, "a@x.com")))
+            db.getTuple("users", newRid)!!.getInt(0) shouldBe 99
+        }
+    }
+
+    @Test
+    fun `updateTuple로 다른 행이 가진 값으로 변경 시 UniqueViolationException`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.createIndex("users_email_key", "users", "email", unique = true)
+            db.insertTuple("users", Tuple(emailSchema, arrayOf(1, "a@x.com")))
+            val rid2 = db.insertTuple("users", Tuple(emailSchema, arrayOf(2, "b@x.com")))
+
+            assertThrows<UniqueViolationException> {
+                db.updateTuple("users", rid2, Tuple(emailSchema, arrayOf(2, "a@x.com")))
+            }
+            db.getTuple("users", rid2)!!.getString(1) shouldBe "b@x.com"
+        }
+    }
+
+    @Test
+    fun `중복 데이터가 있는 테이블에 unique 인덱스 생성 시 UniqueViolationException`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.insertTuple("users", Tuple(emailSchema, arrayOf(1, "a@x.com")))
+            db.insertTuple("users", Tuple(emailSchema, arrayOf(2, "a@x.com")))
+
+            assertThrows<UniqueViolationException> {
+                db.createIndex("users_email_key", "users", "email", unique = true)
+            }
+            db.getCatalog().getIndex("users_email_key").shouldBeNull()
+        }
+    }
+
+    @Test
+    fun `UniqueViolationException은 충돌한 기존 행의 RID를 담는다`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.createIndex("users_email_key", "users", "email", unique = true)
+            val rid = db.insertTuple("users", Tuple(emailSchema, arrayOf(1, "a@x.com")))
+
+            val e = assertThrows<UniqueViolationException> {
+                db.insertTuple("users", Tuple(emailSchema, arrayOf(2, "a@x.com")))
+            }
+            e.conflictingRid shouldBe rid
+        }
+    }
 }

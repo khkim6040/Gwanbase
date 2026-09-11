@@ -5,6 +5,7 @@ import gwanbase.sql.DataException
 import gwanbase.sql.ExecuteResult
 import gwanbase.sql.ParseException
 import gwanbase.table.Database
+import gwanbase.table.UniqueViolationException
 import gwanbase.txn.DatabaseSession
 import gwanbase.txn.DeadlockException
 import gwanbase.txn.LockTimeoutException
@@ -169,6 +170,7 @@ class ConnectionHandler(
             is DeadlockException -> "40P01" // deadlock_detected
             is LockTimeoutException -> "55P03" // lock_not_available
             is DataException -> e.sqlState  // Class 22: data_exception
+            is UniqueViolationException -> e.sqlState // 23505: unique_violation
             else -> "XX000"                 // internal_error
         }
     }

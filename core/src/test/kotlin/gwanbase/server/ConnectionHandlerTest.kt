@@ -4,6 +4,8 @@ import gwanbase.sql.BindException
 import gwanbase.sql.DataException
 import gwanbase.sql.ParseException
 import gwanbase.table.Database
+import gwanbase.table.RID
+import gwanbase.table.UniqueViolationException
 import gwanbase.txn.DeadlockException
 import gwanbase.txn.LockTimeoutException
 import io.kotest.matchers.shouldBe
@@ -193,6 +195,7 @@ class ConnectionHandlerTest {
         ConnectionHandler.sqlStateOf(DeadlockException(1)) shouldBe "40P01"
         ConnectionHandler.sqlStateOf(DataException("x", "22012")) shouldBe "22012"
         ConnectionHandler.sqlStateOf(LockTimeoutException(1, 100)) shouldBe "55P03"
+        ConnectionHandler.sqlStateOf(UniqueViolationException("t_pkey", RID(0, 0))) shouldBe "23505"
         ConnectionHandler.sqlStateOf(IllegalStateException("x")) shouldBe "XX000"
     }
 
