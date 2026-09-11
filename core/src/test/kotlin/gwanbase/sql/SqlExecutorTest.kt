@@ -240,6 +240,44 @@ class SqlExecutorTest {
         }
     }
 
+    // ── 데이터 예외 (SQLSTATE Class 22) ──
+
+    @Test
+    fun `VARCHAR 길이 초과 INSERT 시 string_data_right_truncation 22001`() {
+        executor.execute("CREATE TABLE t (name VARCHAR(3))")
+        val e = assertThrows<DataException> { executor.execute("INSERT INTO t (name) VALUES ('abcd')") }
+        e.sqlState shouldBe "22001"
+    }
+
+    @Test
+    fun `VARCHAR 길이 이내 INSERT는 성공`() {
+        executor.execute("CREATE TABLE t (name VARCHAR(3))")
+        (executor.execute("INSERT INTO t (name) VALUES ('abc')") is ExecuteResult.Inserted) shouldBe true
+    }
+
+    @Test
+    fun `INT 범위 초과 INSERT 시 numeric_value_out_of_range 22003`() {
+        executor.execute("CREATE TABLE t (n INT)")
+        val e = assertThrows<DataException> { executor.execute("INSERT INTO t (n) VALUES (2147483648)") }
+        e.sqlState shouldBe "22003"
+    }
+
+    @Test
+    fun `INT 범위 초과 UPDATE 시 numeric_value_out_of_range 22003`() {
+        executor.execute("CREATE TABLE t (n INT)")
+        executor.execute("INSERT INTO t (n) VALUES (1)")
+        val e = assertThrows<DataException> { executor.execute("UPDATE t SET n = -2147483649") }
+        e.sqlState shouldBe "22003"
+    }
+
+    @Test
+    fun `SELECT에서 0으로 나누면 division_by_zero 22012`() {
+        executor.execute("CREATE TABLE t (n INT)")
+        executor.execute("INSERT INTO t (n) VALUES (1)")
+        val e = assertThrows<DataException> { executor.execute("SELECT n / 0 FROM t") }
+        e.sqlState shouldBe "22012"
+    }
+
     // ── 17. 모든 DataType 라운드트립 ──
 
     @Test

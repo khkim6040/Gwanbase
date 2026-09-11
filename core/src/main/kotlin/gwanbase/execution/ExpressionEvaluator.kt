@@ -145,12 +145,16 @@ object ExpressionEvaluator {
         return if (bothInteger) {
             val l = (left as Number).toLong()
             val r = (right as Number).toLong()
-            when (op) {
-                BinaryOperator.ADD -> l + r
-                BinaryOperator.SUB -> l - r
-                BinaryOperator.MUL -> l * r
-                BinaryOperator.DIV -> l / r
-                else -> error("숫자 연산이 아니다: $op")
+            try {
+                when (op) {
+                    BinaryOperator.ADD -> Math.addExact(l, r)
+                    BinaryOperator.SUB -> Math.subtractExact(l, r)
+                    BinaryOperator.MUL -> Math.multiplyExact(l, r)
+                    BinaryOperator.DIV -> if (r == 0L) throw divisionByZero() else l / r
+                    else -> error("숫자 연산이 아니다: $op")
+                }
+            } catch (e: ArithmeticException) {
+                throw DataException("정수 연산 범위 초과: $l $op $r", "22003")
             }
         } else {
             val l = (left as Number).toDouble()
@@ -159,11 +163,14 @@ object ExpressionEvaluator {
                 BinaryOperator.ADD -> l + r
                 BinaryOperator.SUB -> l - r
                 BinaryOperator.MUL -> l * r
-                BinaryOperator.DIV -> l / r
+                BinaryOperator.DIV -> if (r == 0.0) throw divisionByZero() else l / r
                 else -> error("숫자 연산이 아니다: $op")
             }
         }
     }
+
+    /** PostgreSQL과 동일하게 실수 나눗셈도 0 나누기를 Infinity 대신 에러로 처리한다. */
+    private fun divisionByZero() = DataException("0으로 나눌 수 없다", "22012")
 
     private fun compareValues(left: Any, right: Any): Int {
         if (left is Number && right is Number) {
