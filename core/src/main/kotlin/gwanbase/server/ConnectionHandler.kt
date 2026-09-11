@@ -7,6 +7,7 @@ import gwanbase.sql.ParseException
 import gwanbase.table.Database
 import gwanbase.txn.DatabaseSession
 import gwanbase.txn.DeadlockException
+import gwanbase.txn.LockTimeoutException
 import mu.KotlinLogging
 import java.io.EOFException
 import java.net.Socket
@@ -166,6 +167,7 @@ class ConnectionHandler(
             is ParseException -> "42601"    // syntax_error
             is BindException -> "42000"     // syntax_error_or_access_rule_violation
             is DeadlockException -> "40P01" // deadlock_detected
+            is LockTimeoutException -> "55P03" // lock_not_available
             is DataException -> e.sqlState  // Class 22: data_exception
             else -> "XX000"                 // internal_error
         }

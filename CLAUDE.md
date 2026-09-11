@@ -53,7 +53,8 @@ Gwanbase/                      ← 프로젝트 루트 = Gradle 프로젝트 루
 │           ├── execution/
 │           ├── wal/
 │           ├── txn/
-│           └── optimizer/
+│           ├── optimizer/
+│           └── server/
 ├── bench/                     ← JMH 벤치마크 모듈
 │   └── build.gradle.kts
 └── docs/                      ← Phase별 스펙 문서, 아키텍처 문서
@@ -73,7 +74,19 @@ Phase 5  Crash Recovery (WAL)            ✅ 완료 (tag v0.5-wal)
 Phase 6  Concurrency Control             ✅ 완료 (tag v0.6-txn)
 Phase 7  Query Optimizer                 ✅ 완료 (tag v0.7-optimizer)
 Phase 8  Networking & Client Protocol    ✅ 완료 (tag v0.8-networking)
+고도화   docs/specs/advanced.md 로드맵     🔄 진행 중
 ```
+
+### 고도화 진행 상황
+
+MVP(Phase 0~8) 완성 후에는 `docs/specs/advanced.md`의 축별 우선순위 표를 따른다.
+완료 항목은 해당 문서에 ✅로 표시한다. 현재까지 완료:
+
+| 축 | 항목 | 핵심 파일 |
+|---|---|---|
+| Constraints & Error Semantics | SQLSTATE 매핑 | `server/ConnectionHandler.kt` (`sqlStateOf`) |
+| Constraints & Error Semantics | 데이터 예외 (22001/22003/22012) | `sql/SqlException.kt` (`DataException`), `execution/ExpressionEvaluator.kt`, `sql/SqlExecutor.kt` |
+| Constraints & Error Semantics | 락 타임아웃 (55P03) | `txn/LockManager.kt` (`LockTimeoutException`), `txn/DatabaseSession.kt` (`lockTimeoutMillis`) |
 
 ### Phase 1 컴포넌트 (완료)
 
@@ -193,7 +206,8 @@ Phase 8  Networking & Client Protocol    ✅ 완료 (tag v0.8-networking)
 2. 새로 추가한 public 클래스/함수에 KDoc 한국어 주석 존재
 3. 테스트 메서드명이 백틱 한국어 형식 (예: `` `삽입 후 조회 시 동일한 값 반환` ``)
 4. `require()`/`check()`로 전제조건·상태 검증 포함
-5. 커밋 메시지가 `[Phase N] 설명` 형식
+5. 커밋 메시지가 커밋 규칙(`### 커밋` 섹션)을 따름
+6. 고도화 항목 완료 시 `docs/specs/advanced.md`에 ✅ 표시와 결정 이유 기록
 
 ## 아키텍처: 스토리지 레이어 (Phase 1 완료 부분)
 
@@ -226,8 +240,8 @@ ByteBufferExtensions ← length-prefixed 읽기/쓰기, newPageBuffer() 유틸�
 
 ### 패키지 구조
 - 패키지는 `gwanbase.<모듈명>`으로 시작한다. (예: `gwanbase.storage`, `gwanbase.index`)
-- 계획된 패키지: `gwanbase.table`, `gwanbase.sql`, `gwanbase.execution`, `gwanbase.txn`, `gwanbase.optimizer`, `gwanbase.server`
 - 모듈 간 의존 방향: `server → txn → execution → sql → table → index → storage`
+  (`wal`은 `storage.WalCallback` 인터페이스로 의존성을 역전시켜 연결)
 - 하위 모듈이 상위 모듈을 참조하면 안 된다.
 
 ### 테스트 (TDD)
@@ -248,13 +262,14 @@ ByteBufferExtensions ← length-prefixed 읽기/쓰기, newPageBuffer() 유틸�
 - 구현 코드를 테스트 없이 먼저 작성하지 않는다. (TDD 섹션과 중복이지만 강조)
 
 ### 커밋
-- 커밋 메시지 포맷: `[Phase N] 간결한 설명`
-- 예: `[Phase 1] B+Tree 삽입 및 검색 구현`
-- 예: `[Phase 1] BufferPoolManager eviction 버그 수정`
+- Phase 0~8 (MVP) 기간: `[Phase N] 간결한 설명` (예: `[Phase 1] B+Tree 삽입 및 검색 구현`)
+- Phase 8 완료 이후 고도화: `타입: 간결한 설명` — `feat:`, `fix:`, `docs:`, `refactor:`, `bench:`
+  (예: `feat: 락 대기 타임아웃(SQLSTATE 55P03) 추가`)
+- 제목 한 줄만 작성하고 본문은 넣지 않는다.
 
 ### 브랜치
-- `main`: 안정 브랜치
-- `phase-N/<기능>`: 기능 개발 브랜치
+- `main`: 안정 브랜치. 직접 push하지 않고 PR로 머지한다.
+- MVP 기간: `phase-N/<기능>`, 고도화: `feat/<기능>`, `docs/<주제>`, `bench/<주제>`
 - Phase 완료 시 태그: `v0.1-kvstore`, `v0.2-table` 등
 
 ## Phase별 설계 가이드

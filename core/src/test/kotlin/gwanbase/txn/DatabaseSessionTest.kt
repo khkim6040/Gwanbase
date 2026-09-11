@@ -108,4 +108,20 @@ class DatabaseSessionTest {
             result.rows.size shouldBe 0
         }
     }
+
+    @Test
+    fun `lockTimeoutMillis 초과 시 LockTimeoutException`() {
+        db.executeSql("INSERT INTO t (id, name) VALUES (1, 'a')")
+        db.createSession().use { s1 ->
+            db.createSession().use { s2 ->
+                s1.executeSql("BEGIN")
+                s1.executeSql("UPDATE t SET name = 'b' WHERE id = 1")
+
+                s2.lockTimeoutMillis = 100
+                shouldThrow<LockTimeoutException> {
+                    s2.executeSql("UPDATE t SET name = 'c' WHERE id = 1")
+                }
+            }
+        }
+    }
 }

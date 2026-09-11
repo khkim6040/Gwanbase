@@ -19,6 +19,16 @@ class DatabaseSession(
 ) : AutoCloseable {
 
     private var currentTxn: TransactionContext? = null
+
+    /**
+     * 잠금 최대 대기 시간 (ms). 0이면 무한 대기. PostgreSQL `lock_timeout` GUC에 해당한다.
+     * 초과 시 LockTimeoutException(55P03)이 발생하고 트랜잭션은 abort된다.
+     */
+    var lockTimeoutMillis: Long = 0
+        set(value) {
+            require(value >= 0) { "lockTimeoutMillis는 0 이상이어야 한다: $value" }
+            field = value
+        }
     private val sqlExecutor: SqlExecutor = SqlExecutor(database, session = this)
 
     /**
@@ -91,7 +101,7 @@ class DatabaseSession(
             override fun hasNext() = rawIter.hasNext()
             override fun next(): Pair<RID, Tuple> {
                 val (rid, tuple) = rawIter.next()
-                lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.SHARED)
+                lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.SHARED, lockTimeoutMillis)
                 return rid to tuple
             }
         }
@@ -101,7 +111,7 @@ class DatabaseSession(
     internal fun insertTupleWithLock(tableName: String, tuple: Tuple): RID {
         val rid = database.insertTuple(tableName, tuple)
         currentTxn?.let { txn ->
-            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE)
+            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE, lockTimeoutMillis)
         }
         return rid
     }
@@ -109,7 +119,7 @@ class DatabaseSession(
     /** DELETE 시 대상 행에 X 잠금을 획득하는 래퍼. */
     internal fun deleteTupleWithLock(tableName: String, rid: RID): Boolean {
         currentTxn?.let { txn ->
-            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE)
+            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE, lockTimeoutMillis)
         }
         return database.deleteTuple(tableName, rid)
     }
@@ -117,7 +127,7 @@ class DatabaseSession(
     /** UPDATE 시 대상 행에 X 잠금을 획득하는 래퍼. */
     internal fun updateTupleWithLock(tableName: String, rid: RID, tuple: Tuple): RID {
         currentTxn?.let { txn ->
-            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE)
+            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE, lockTimeoutMillis)
         }
         return database.updateTuple(tableName, rid, tuple)
     }
@@ -125,14 +135,14 @@ class DatabaseSession(
     /** S 잠금을 획득한다. IndexScanOperator 등에서 개별 행에 잠금을 걸 때 사용한다. */
     internal fun acquireSharedLock(tableName: String, rid: RID) {
         currentTxn?.let { txn ->
-            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.SHARED)
+            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.SHARED, lockTimeoutMillis)
         }
     }
 
     /** X 잠금만 획득하고 실제 업데이트는 하지 않는다. 잠금 후 재조회를 위해 사용한다. */
     internal fun acquireExclusiveLock(tableName: String, rid: RID) {
         currentTxn?.let { txn ->
-            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE)
+            lockManager.acquire(txn.txnId, LockTarget(tableName, rid), LockMode.EXCLUSIVE, lockTimeoutMillis)
         }
     }
 

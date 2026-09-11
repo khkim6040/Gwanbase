@@ -3,6 +3,7 @@ package gwanbase.txn
 import gwanbase.table.RID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * 잠금 대상을 식별하는 키.
@@ -24,6 +25,13 @@ enum class LockMode {
  */
 class DeadlockException(val victimTxnId: Int) : RuntimeException(
     "데드락 감지: 트랜잭션 $victimTxnId 이 victim으로 선택됨"
+)
+
+/**
+ * 잠금 대기 시간 초과 시 던지는 예외 (SQLSTATE 55P03 lock_not_available).
+ */
+class LockTimeoutException(val txnId: Int, val timeoutMillis: Long) : RuntimeException(
+    "잠금 대기 시간 초과: 트랜잭션 $txnId 이 ${timeoutMillis}ms 동안 잠금을 얻지 못함"
 )
 
 /**
@@ -58,9 +66,12 @@ class LockManager {
      * @param txnId 트랜잭션 ID
      * @param target 잠금 대상
      * @param mode 잠금 모드
+     * @param timeoutMillis 최대 대기 시간 (ms). 0이면 무한 대기 (PostgreSQL lock_timeout과 동일)
      * @throws DeadlockException 데드락이 감지된 경우
+     * @throws LockTimeoutException 대기 시간을 초과한 경우
      */
-    fun acquire(txnId: Int, target: LockTarget, mode: LockMode) {
+    fun acquire(txnId: Int, target: LockTarget, mode: LockMode, timeoutMillis: Long = 0) {
+        require(timeoutMillis >= 0) { "timeoutMillis는 0 이상이어야 한다: $timeoutMillis" }
         val entry = locks.computeIfAbsent(target) { LockEntry() }
 
         while (true) {
@@ -108,14 +119,21 @@ class LockManager {
             // synchronized 블록 밖에서 데드락 감지 후 대기 — releaseAll()이 진입할 수 있도록
             if (request != null) {
                 if (detectDeadlock(txnId, blockers)) {
-                    synchronized(entry) {
-                        entry.waitQueue.removeAll { it.txnId == txnId }
-                    }
+                    abandonWait(entry, txnId)
                     throw DeadlockException(txnId)
                 }
-                request!!.latch.await()
-                // grantWaiters()에서 이미 holders에 추가했으므로 별도 처리 불필요
-                return
+                val granted = if (timeoutMillis == 0L) {
+                    request!!.latch.await(); true
+                } else {
+                    request!!.latch.await(timeoutMillis, TimeUnit.MILLISECONDS)
+                }
+                if (granted) return // grantWaiters()에서 이미 holders에 추가했다
+                synchronized(entry) {
+                    // 타임아웃 직전에 부여됐을 수 있으므로 latch를 다시 확인한다
+                    if (request!!.latch.count == 0L) return
+                    abandonWait(entry, txnId)
+                }
+                throw LockTimeoutException(txnId, timeoutMillis)
             }
         }
     }
@@ -132,6 +150,17 @@ class LockManager {
                 }
                 entry.waitQueue.removeAll { it.txnId == txnId }
             }
+        }
+    }
+
+    /**
+     * 대기를 포기한 트랜잭션을 대기열에서 제거하고, 뒤에 막혀 있던 대기자를 재평가한다.
+     * FIFO 큐에서 앞 요청이 사라지면 뒤 요청이 호환될 수 있기 때문이다.
+     */
+    private fun abandonWait(entry: LockEntry, txnId: Int) {
+        synchronized(entry) {
+            entry.waitQueue.removeAll { it.txnId == txnId }
+            grantWaiters(entry)
         }
     }
 

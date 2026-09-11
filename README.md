@@ -6,6 +6,7 @@ Kotlin으로 관계형 데이터베이스를 밑바닥부터 만들어보는 프
 ## 현재 상태
 
 8개 Phase를 모두 완료했다. `psql`이나 JDBC 드라이버로 접속해서 SQL을 실행할 수 있다.
+이후로는 [고도화 로드맵](docs/specs/advanced.md)을 따라 PostgreSQL internals에 가깝게 확장 중이다.
 
 | Phase | 내용 | 태그 |
 |---|---|---|
@@ -58,10 +59,24 @@ core/src/main/kotlin/gwanbase/
 - JMH 벤치마크
 - Netty Buffer (ByteBuffer 유틸리티)
 
+## 사용 예시
+
+```kotlin
+val db = Database.open(Path.of("mydb.gwan"))
+GwanServer(db, port = 5432).use { server ->
+    server.start()
+    // psql -h localhost -p 5432 -U gwanbase
+}
+db.close()
+```
+
 ## 설계 문서
 
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — 전체 아키텍처
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — 전체 아키텍처, SQL 실행 경로, 에러 전달 경로
 - [docs/specs/](docs/specs/) — Phase별 스펙, 설계 결정, 트레이드오프
+- [docs/specs/advanced.md](docs/specs/advanced.md) — 고도화 로드맵 및 진행 상황
+- [docs/benchmark-report.md](docs/benchmark-report.md) — JMH 벤치마크 결과
+- [docs/plans/](docs/plans/) — Phase별 구현 계획서 (과거 기록)
 
 ## 참고 자료
 
