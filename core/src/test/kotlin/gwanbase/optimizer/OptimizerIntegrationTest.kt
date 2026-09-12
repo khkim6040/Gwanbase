@@ -170,6 +170,67 @@ class OptimizerIntegrationTest {
         result.rows shouldBe listOf(listOf(2001))
     }
 
+    private fun prepareIndexedUsers() {
+        for (i in 1..1100) {
+            database.executeSql("INSERT INTO users (id, name, age) VALUES ($i, 'user$i', ${20 + i % 50})")
+        }
+        database.executeSql("CREATE INDEX idx_users_id ON users (id)")
+        database.executeSql("ANALYZE users")
+    }
+
+    private fun selectIds(sql: String): List<Any?> =
+        database.executeSql(sql).shouldBeInstanceOf<ExecuteResult.Selected>().rows.map { it[0] }
+
+    private fun explain(sql: String): String =
+        database.executeSql("EXPLAIN $sql").shouldBeInstanceOf<ExecuteResult.Explained>().planText
+
+    @Test
+    fun `범위 조건 SELECT가 IndexScan으로 정확한 행을 반환한다 - 단방향`() {
+        prepareIndexedUsers()
+        val sql = "SELECT id FROM users WHERE id > 1095"
+        explain(sql) shouldContain "range=(1095, +inf)"
+        selectIds(sql) shouldBe listOf(1096, 1097, 1098, 1099, 1100)
+    }
+
+    @Test
+    fun `범위 조건 SELECT가 IndexScan으로 정확한 행을 반환한다 - 양방향`() {
+        prepareIndexedUsers()
+        val sql = "SELECT id FROM users WHERE id >= 1090 AND id <= 1094"
+        explain(sql) shouldContain "range=[1090, 1094]"
+        selectIds(sql) shouldBe listOf(1090, 1091, 1092, 1093, 1094)
+    }
+
+    @Test
+    fun `범위 조건과 다른 컬럼 조건이 함께 있으면 필터로 재검사한다`() {
+        prepareIndexedUsers()
+        // age = 20 + i % 50 → id 1100은 age 20, 1099는 69, 1098은 68 …
+        val sql = "SELECT id FROM users WHERE id > 1095 AND age = 20"
+        explain(sql) shouldContain "IndexScan"
+        selectIds(sql) shouldBe listOf(1100)
+    }
+
+    @Test
+    fun `리터럴이 왼쪽인 범위 조건도 IndexScan을 쓴다`() {
+        prepareIndexedUsers()
+        val sql = "SELECT id FROM users WHERE 4 > id"
+        explain(sql) shouldContain "range=(-inf, 4)"
+        selectIds(sql) shouldBe listOf(1, 2, 3)
+    }
+
+    @Test
+    fun `모순된 범위 조건은 빈 결과를 반환한다`() {
+        prepareIndexedUsers()
+        val sql = "SELECT id FROM users WHERE id > 1095 AND id < 1090"
+        explain(sql) shouldContain "IndexScan"
+        selectIds(sql) shouldBe emptyList()
+    }
+
+    @Test
+    fun `등가 조건 EXPLAIN은 key= 형식으로 출력된다`() {
+        prepareIndexedUsers()
+        explain("SELECT id FROM users WHERE id = 500") shouldContain "key=500"
+    }
+
     /** SQL 텍스트에서 파싱 + 바인딩한 Statement.Select를 반환한다. */
     private fun parseSelect(sql: String): Statement.Select {
         val tokens = Lexer(sql).tokenize()
