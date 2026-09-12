@@ -92,7 +92,8 @@ sealed class PlanNode {
         val line = when (this) {
             is SeqScan -> "${prefix}SeqScan(table=$tableName${if (filter != null) ", filter=$filter" else ""})" +
                 "  rows=$estimatedRows cost=${"%.1f".format(estimatedCost)}"
-            is IndexScan -> "${prefix}IndexScan(table=$tableName, index=$indexName, ${describeRange()})" +
+            is IndexScan -> "${prefix}IndexScan(table=$tableName, index=$indexName, " +
+                "${describeRange()}${if (filter != null) ", filter=$filter" else ""})" +
                 "  rows=$estimatedRows cost=${"%.1f".format(estimatedCost)}"
             is NestedLoopJoin -> "${prefix}NestedLoopJoin(on=$condition)" +
                 "  rows=$estimatedRows cost=${"%.1f".format(estimatedCost)}"

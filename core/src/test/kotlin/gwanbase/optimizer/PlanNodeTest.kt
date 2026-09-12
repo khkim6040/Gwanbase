@@ -40,4 +40,17 @@ class PlanNodeTest {
         val node = scan(null, Bound(Expression.StringLiteral("abc"), true))
         node.explain() shouldContain "range=(-inf, 'abc']"
     }
+
+    @Test
+    fun `IndexScan EXPLAIN에 filter가 출력된다`() {
+        val filter = Expression.BinaryOp(
+            Expression.ColumnRef(null, "age"), gwanbase.sql.BinaryOperator.EQ, Expression.IntLiteral(20),
+        )
+        val node = PlanNode.IndexScan(
+            tableName = "t", indexName = "idx", indexColumnName = "c",
+            lowerBound = Bound(Expression.IntLiteral(20), false), upperBound = null,
+            filter = filter, estimatedRows = 1, estimatedCost = 4.0,
+        )
+        node.explain() shouldContain "filter="
+    }
 }
