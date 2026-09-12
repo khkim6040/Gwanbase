@@ -26,21 +26,51 @@ class CostEstimatorTest {
     }
 
     @Test
-    fun `범위 선택도 - 통계 있을 때 비율 계산`() {
+    fun `범위 선택도 - 하한만 있을 때 (max - lower) 나누기 (max - min)`() {
         val stats = ColumnStats(distinctCount = 100, minValue = 0L, maxValue = 100L, nullCount = 0)
-        // threshold=50 → (100-50)/(100-0) = 0.5
-        CostEstimator.rangeSelectivity(stats, 50) shouldBe 0.5
+        CostEstimator.rangeSelectivity(stats, 50, null) shouldBe 0.5
     }
 
     @Test
-    fun `범위 선택도 - 통계 없을 때 기본값`() {
-        CostEstimator.rangeSelectivity(null, 50) shouldBe CostEstimator.DEFAULT_RANGE_SELECTIVITY
+    fun `범위 선택도 - 상한만 있을 때 (upper - min) 나누기 (max - min)`() {
+        val stats = ColumnStats(distinctCount = 100, minValue = 0L, maxValue = 100L, nullCount = 0)
+        CostEstimator.rangeSelectivity(stats, null, 20) shouldBe 0.2
+    }
+
+    @Test
+    fun `범위 선택도 - 양방향은 구간 길이 비율`() {
+        val stats = ColumnStats(distinctCount = 100, minValue = 0L, maxValue = 100L, nullCount = 0)
+        CostEstimator.rangeSelectivity(stats, 20, 30) shouldBe 0.1
+    }
+
+    @Test
+    fun `범위 선택도 - 경계가 통계 범위 밖이면 0과 1로 clamp`() {
+        val stats = ColumnStats(distinctCount = 100, minValue = 0L, maxValue = 100L, nullCount = 0)
+        CostEstimator.rangeSelectivity(stats, 200, null) shouldBe 0.0
+        CostEstimator.rangeSelectivity(stats, -50, null) shouldBe 1.0
+    }
+
+    @Test
+    fun `범위 선택도 - 통계 없을 때 단방향 기본값`() {
+        CostEstimator.rangeSelectivity(null, 50, null) shouldBe CostEstimator.DEFAULT_RANGE_SELECTIVITY
+    }
+
+    @Test
+    fun `범위 선택도 - 통계 없을 때 양방향 기본값`() {
+        CostEstimator.rangeSelectivity(null, 20, 30) shouldBe CostEstimator.DEFAULT_TWO_SIDED_RANGE_SELECTIVITY
     }
 
     @Test
     fun `범위 선택도 - min과 max가 같으면 기본값`() {
         val stats = ColumnStats(distinctCount = 1, minValue = 5L, maxValue = 5L, nullCount = 0)
-        CostEstimator.rangeSelectivity(stats, 5) shouldBe CostEstimator.DEFAULT_RANGE_SELECTIVITY
+        CostEstimator.rangeSelectivity(stats, 5, null) shouldBe CostEstimator.DEFAULT_RANGE_SELECTIVITY
+    }
+
+    @Test
+    fun `범위 선택도 - 경계가 둘 다 없으면 예외`() {
+        org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+            CostEstimator.rangeSelectivity(null, null, null)
+        }
     }
 
     @Test
