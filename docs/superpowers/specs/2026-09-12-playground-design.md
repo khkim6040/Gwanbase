@@ -43,8 +43,11 @@ playground/
     └── test/kotlin/gwanbase/playground/
 ```
 
-`core` 변경은 하나뿐이다: `ConnectionHandler.sqlStateOf`를 `internal` → `public`.
-다른 모듈에서 SQLSTATE 매핑을 재사용하기 위해서다.
+`core` 변경은 둘이다: (1) `ConnectionHandler.sqlStateOf`를 `internal` → `public`
+(다른 모듈에서 SQLSTATE 매핑 재사용), (2) `DatabaseSession.executeSql`이 호출마다
+트랜잭션을 호출 스레드에 바인딩 (WalCallback이 ThreadLocal로 트랜잭션을 찾는데,
+HTTP 스레드 풀에서는 한 세션이 요청마다 다른 스레드에서 실행되므로 필요하다.
+GwanServer는 연결당 스레드 하나라 드러나지 않던 전제였다).
 
 ## 엔드포인트
 
@@ -56,8 +59,9 @@ playground/
 | `POST /reset` | — | `{"ok": true}` |
 
 - `kind`는 `ExecuteResult`의 서브타입명(`Selected`, `Inserted`, `Updated`, …).
-  `columns`/`rows`는 `Selected`에만, `count`는 `Updated`/`Deleted`에만,
-  `message`는 그 외(예: `CREATE TABLE users`)에 채운다. 없는 필드는 생략한다.
+  `columns`/`rows`는 `Selected`에만, `count`는 `Updated`/`Deleted`(영향 행 수)와
+  `Selected`/`Explained`(자르기 전 전체 행 수)에, `message`는 그 외(예: `CREATE TABLE users`)에
+  채운다. 없는 필드는 생략한다.
 - `txn`은 `"I"`(idle) / `"T"`(트랜잭션 중) / `"E"`(트랜잭션 실패). PG 프로토콜의
   `ReadyForQuery` 상태와 같은 의미다.
 - `/schema`는 `Catalog.listTables()`와 `getIndexesForTable()`로 만든다.
@@ -75,6 +79,12 @@ playground/
   실행된다.
 - 모든 세션에 `lockTimeoutMillis = 5000`을 준다. 다른 방문자의 미커밋 행에
   걸리면 무한 대기 대신 55P03을 받는다.
+- 알려진 한계: core의 HeapFile/BPlusTree/Catalog에는 아직 래치가 없어 두 방문자의
+  동시 DDL/DML이 페이지를 손상시킬 수 있다. GwanServer에 psql 두 개를 붙여도
+  같다. 플레이그라운드 계층에서 전역 락으로 막지 않는 이유는, 한 문장이 행 잠금을
+  5초 기다리는 동안 모든 방문자가 멈추고 잠금 대기 데모 자체가 불가능해지기
+  때문이다. 손상 시 복구 경로는 "초기화"다. B+Tree 래치가 도입되면 이 한계는
+  사라진다.
 - idle 10분이 지난 세션은 백그라운드 스레드가 close한다. close는 미커밋
   트랜잭션을 abort하고 잠금을 풀므로, 브라우저를 닫고 떠난 방문자가 잠금을
   영원히 쥐는 일을 막는다. 이것이 공유 DB 모델에서 가장 중요한 안전장치다.
@@ -96,8 +106,8 @@ playground/
 프레임워크 없이 vanilla JS 한 파일.
 
 - **좌측 사이드바**: `/schema` 결과(테이블 → 컬럼·인덱스), "초기화" 버튼(확인 후 `/reset`).
-- **우측 상단**: SQL textarea, 실행 버튼(Ctrl/Cmd+Enter), 예제 버튼 8개 —
-  SELECT, JOIN, EXPLAIN, INSERT, UPDATE, BEGIN…ROLLBACK, UNIQUE 위반, FK 위반.
+- **우측 상단**: SQL textarea, 실행 버튼(Ctrl/Cmd+Enter), 예제 버튼 9개 —
+  SELECT, JOIN, EXPLAIN, INSERT, UPDATE, BEGIN, ROLLBACK, UNIQUE 위반, FK 위반.
   클릭하면 textarea에 채워진다.
 - **우측 하단**: 실행 이력. 입력 SQL과 결과(테이블 또는 빨간 에러 + SQLSTATE)를
   위→아래로 누적하고, 각 항목에 `txn` 배지를 붙인다.
