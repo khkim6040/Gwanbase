@@ -100,10 +100,10 @@ playground/
 
 ## 샘플 데이터 (`SampleData`)
 
-- `users(id INT PRIMARY KEY, name VARCHAR, age INT)` 5행
-- `orders(id INT PRIMARY KEY, user_id INT REFERENCES users(id), amount INT)` 8행
-- `CREATE INDEX idx_orders_user ON orders(user_id)`
-- 실제 문법은 구현 시 `Parser`가 지원하는 형태로 맞춘다.
+- `CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50), age INT)` 5행
+- `CREATE TABLE orders (id INT PRIMARY KEY, user_id INT REFERENCES users(id), amount INT)` 8행
+- `CREATE INDEX idx_orders_user ON orders (user_id)`
+- 위 문법은 모두 현재 `Parser`가 지원한다 (`SqlExecutorTest` 참조).
 
 ## 테스트
 
