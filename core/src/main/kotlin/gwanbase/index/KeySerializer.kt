@@ -10,8 +10,12 @@ import java.nio.ByteOrder
  *
  * unsigned lexicographic 비교에서 올바른 정렬 순서가 보존되도록
  * 부호 있는 정수 타입은 부호 비트를 반전시킨다.
+ * VARCHAR는 뒤에 0x00 종단 바이트를 붙여 접두사 순서를 보존한다.
  */
 object KeySerializer {
+
+    /** VARCHAR 키 종단 바이트. 접두사 관계인 문자열들의 복합 키 순서를 보존한다. */
+    private val VARCHAR_TERMINATOR = byteArrayOf(0)
 
     /**
      * 컬럼 값을 B+Tree 키 바이트 배열로 직렬화한다.
@@ -44,7 +48,16 @@ object KeySerializer {
                 buf.array()
             }
 
-            DataType.VARCHAR -> (value as String).toByteArray(Charsets.UTF_8)
+            DataType.VARCHAR -> {
+                val str = value as String
+                // 종단 바이트가 없으면 'abc' + RID 와 'abcd' + RID 의 바이트 순서가 문자열 순서와
+                // 어긋나 등가·범위 스캔 구간에 접두사를 공유하는 다른 값이 섞인다.
+                // UTF-8은 NUL 문자 외에 0x00 바이트를 만들지 않으므로 0x00이 안전한 종단자다.
+                // PostgreSQL도 text에 NUL을 허용하지 않는다:
+                // https://www.postgresql.org/docs/current/datatype-character.html
+                require('\u0000' !in str) { "VARCHAR 인덱스 키에 NUL 문자를 포함할 수 없다" }
+                str.toByteArray(Charsets.UTF_8) + VARCHAR_TERMINATOR
+            }
 
             DataType.BOOLEAN -> byteArrayOf(if (value as Boolean) 1 else 0)
 

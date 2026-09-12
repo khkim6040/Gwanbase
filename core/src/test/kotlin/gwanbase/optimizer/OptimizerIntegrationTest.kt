@@ -151,6 +151,25 @@ class OptimizerIntegrationTest {
         text shouldContain "Project"
     }
 
+    @Test
+    fun `VARCHAR 인덱스 등가 검색이 접두사를 공유하는 행을 반환하지 않는다`() {
+        for (i in 1..1100) {
+            database.executeSql("INSERT INTO users (id, name, age) VALUES ($i, 'user$i', 20)")
+        }
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (2001, 'abc', 1)")
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (2002, 'abcd', 1)")
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (2003, 'abd', 1)")
+        database.executeSql("CREATE INDEX idx_users_name ON users (name)")
+        database.executeSql("ANALYZE users")
+
+        val explain = database.executeSql("EXPLAIN SELECT id FROM users WHERE name = 'abc'")
+        explain.shouldBeInstanceOf<ExecuteResult.Explained>().planText shouldContain "IndexScan"
+
+        val result = database.executeSql("SELECT id FROM users WHERE name = 'abc'")
+            .shouldBeInstanceOf<ExecuteResult.Selected>()
+        result.rows shouldBe listOf(listOf(2001))
+    }
+
     /** SQL 텍스트에서 파싱 + 바인딩한 Statement.Select를 반환한다. */
     private fun parseSelect(sql: String): Statement.Select {
         val tokens = Lexer(sql).tokenize()

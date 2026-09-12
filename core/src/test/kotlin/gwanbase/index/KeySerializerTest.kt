@@ -5,7 +5,10 @@ import gwanbase.table.RID
 import io.kotest.matchers.comparables.shouldBeGreaterThan
 import io.kotest.matchers.comparables.shouldBeLessThan
 import io.kotest.matchers.shouldBe
+import io.kotest.property.Arb
+import io.kotest.property.arbitrary.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 
 class KeySerializerTest {
 
@@ -105,6 +108,50 @@ class KeySerializerTest {
         val empty = KeySerializer.serializeKey("", DataType.VARCHAR)
         val nonEmpty = KeySerializer.serializeKey("a", DataType.VARCHAR)
         compareBytes(empty, nonEmpty) shouldBeLessThan 0
+    }
+
+    @Test
+    fun `VARCHAR - 등가 스캔 구간이 접두사를 공유하는 더 긴 문자열을 포함하지 않는다`() {
+        // 'abc' 등가 스캔 구간은 [abc, successor(abc)) 이다.
+        // 'abcd' + RID 복합 키가 이 구간 밖(뒤)에 있어야 한다.
+        val abc = KeySerializer.serializeKey("abc", DataType.VARCHAR)
+        val end = KeySerializer.equalityScanEnd(abc)
+        val abcdComposite = KeySerializer.compositeKey(
+            KeySerializer.serializeKey("abcd", DataType.VARCHAR), RID(0, 0),
+        )
+        compareBytes(abcdComposite, end) shouldBeGreaterThan 0
+    }
+
+    @Test
+    fun `VARCHAR - 접두사 복합 키가 더 긴 문자열 복합 키보다 앞에 온다`() {
+        // RID 바이트가 문자열 바이트보다 클 수 있어도 순서가 뒤집히지 않아야 한다.
+        val abc = KeySerializer.compositeKey(
+            KeySerializer.serializeKey("abc", DataType.VARCHAR), RID(Int.MAX_VALUE, 0xFFFF),
+        )
+        val abcd = KeySerializer.compositeKey(
+            KeySerializer.serializeKey("abcd", DataType.VARCHAR), RID(0, 0),
+        )
+        compareBytes(abc, abcd) shouldBeLessThan 0
+    }
+
+    @Test
+    fun `VARCHAR - NUL 문자를 포함하면 예외`() {
+        assertThrows<IllegalArgumentException> {
+            KeySerializer.serializeKey("a\u0000b", DataType.VARCHAR)
+        }
+    }
+
+    @Test
+    fun `VARCHAR - 복합 키 순서가 문자열 순서와 일치한다 (property)`() {
+        // 영숫자만 쓰면 UTF-16 비교(String.compareTo)와 UTF-8 바이트 순서가 같다.
+        val strings = Arb.string(0..8, Codepoint.alphanumeric()).take(300).toList()
+        val rid = RID(123, 45)
+        for (a in strings) for (b in strings) {
+            if (a == b) continue
+            val ka = KeySerializer.compositeKey(KeySerializer.serializeKey(a, DataType.VARCHAR), rid)
+            val kb = KeySerializer.compositeKey(KeySerializer.serializeKey(b, DataType.VARCHAR), rid)
+            Integer.signum(compareBytes(ka, kb)) shouldBe Integer.signum(a.compareTo(b))
+        }
     }
 
     // --- BOOLEAN ---
