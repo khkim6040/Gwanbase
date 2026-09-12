@@ -167,8 +167,20 @@ fun search(key: ByteArray): ByteArray? {
 4. 부모 내부 노드도 가득 차 있으면 같은 방식으로 재귀적으로 split.
    - 내부 노드 split은 **middle key를 부모로 promote하며 중복 저장하지 않는다**
      (B+Tree 불변식).
-5. 루트가 split되면 **새 루트 내부 노드를 할당**하고 두 자식을 등록한다.
-   메타데이터 페이지의 `rootPageId`를 갱신한다.
+5. 루트가 split되면 **루트 페이지 ID는 유지**한다. 기존 루트 내용을 새 페이지로
+   옮겨 왼쪽 자식으로 삼고, 루트 페이지를 (leftmostChild=옮긴 페이지,
+   slot[0]=(promoteKey, 오른쪽 자식))인 내부 노드로 다시 초기화한다.
+
+> **왜 루트 페이지를 옮기지 않는가?**
+> 루트 ID를 Catalog(Phase 2 이후)와 KVStore 메타데이터가 기억한다. 루트가
+> 이동하면 이 값을 매번 갱신해야 하고, 갱신을 빠뜨리면 옛 루트(이제는 리프)
+> 에서 탐색이 시작되어 대부분의 키를 찾지 못한다 (실제로 `CREATE INDEX` 이후
+> 삽입에서 이 버그가 있었다). SQLite는 루트 페이지 번호가 테이블의 영구
+> 식별자(`sqlite_schema.rootpage`)라 `balance_deeper()`가 같은 방식으로 루트를
+> 제자리에 두고 내용을 자식으로 내린다. PostgreSQL은 루트를 새 페이지로 올리고
+> 인덱스별 메타페이지(`btm_root`)를 갱신하는데(`_bt_newlevel`), 인덱스마다
+> 메타페이지가 있어 갱신이 페이지 하나 쓰기로 끝나기 때문이다. Gwanbase는
+> 루트 ID가 단일 Catalog 페이지에 모여 있어 SQLite 방식이 더 싸고 안전하다.
 
 > **왜 리프의 첫 키를 promote하는가?**
 > B+Tree에서 내부 노드의 키는 "오른쪽 서브트리의 모든 키 ≥ 이 키"를
@@ -208,9 +220,8 @@ underflow/merge/rebalance는 구현하지 않는다.
 
 - `KVStore.open()` 시 페이지 0을 읽어 rootPageId를 복원한다. 파일이 비어
   있으면 빈 리프 루트를 새로 만들고 메타데이터 페이지를 초기화한다.
-- rootPageId가 변할 때마다 메타데이터 페이지를 갱신하고 flush한다. Phase 5
-  WAL 도입 이전까지는 메타데이터 쓰기가 **atomic하다고 가정**한다 (crash 시
-  일관성 보장 없음 — 이것이 WAL이 필요한 이유).
+- rootPageId는 루트 split에도 변하지 않으므로 메타데이터 페이지는 생성 시
+  한 번만 쓰면 된다 (`close()` 시 한 번 더 기록해 두는 것은 방어적 조치).
 
 #### BufferPoolManager 연동 규약
 
@@ -249,7 +260,7 @@ Control)에서 추가한다.
 | B+Tree 노드 레이아웃 | 정렬 슬롯 전용 레이아웃 | SlottedPage 재활용 | SlottedPage 슬롯은 삽입 순서라 이진 탐색 불가 |
 | B+Tree order | Free-space 기반 | 고정 order | 가변 길이 키에서 공간 효율 |
 | 키 비교 | Unsigned lexicographic | Signed byte 비교 | 0x80 이상 바이트 정렬 정확성 |
-| 루트 관리 | 메타데이터 페이지(pageId=0) | 별도 파일 | 단일 파일 유지, 원자성은 WAL 이후 |
+| 루트 관리 | 메타데이터 페이지(pageId=0), 루트 ID 고정 (SQLite `balance_deeper` 방식) | PostgreSQL: 메타페이지 `btm_root` 갱신 (`_bt_newlevel`) | 루트 ID를 기억하는 곳(Catalog)이 한 페이지에 모여 있어 갱신보다 고정이 싸다 |
 | 메타데이터 원자성 | 미보장 (Phase 5까지) | fsync+double-write | WAL 도입 전까지 crash 일관성 포기 |
 
 ## 테스트 시나리오
@@ -282,7 +293,8 @@ Control)에서 추가한다.
    키 분포가 거의 균등(바이트 기준)
 9. **내부 노드 split**: 리프 split이 전파되어 내부 노드도 split → 트리 높이
    증가 확인
-10. **루트 split**: 루트 split 후 새 루트 pageId가 메타데이터 페이지에 반영
+10. **루트 split**: 루트 split 후에도 `rootPageId`가 변하지 않고, 같은 ID로
+    다시 연 트리에서 모든 키가 조회됨
 11. **범위 스캔**: 100건 삽입 후 `scan(30, 60)` → 정확히 31개 반환, 정렬 순서
 12. **전체 리프 순회**: 가장 작은 키부터 `nextLeafPageId` 따라가면 전체 키가
     오름차순으로 나오는지
@@ -296,7 +308,7 @@ Control)에서 추가한다.
     서브트리의 모든 키
   - 리프 체인 순회 시 키가 오름차순
   - 루트가 아닌 모든 노드에 최소 1개 이상 엔트리 존재
-  - 메타데이터 페이지의 `rootPageId`는 실제 루트와 일치
+  - 메타데이터 페이지의 `rootPageId`는 실제 루트와 일치 (루트 split 후에도)
 
 ### KVStore 통합 테스트 (`KVStoreTest`)
 
@@ -336,4 +348,7 @@ Control)에서 추가한다.
 - *Database Internals* Ch.1–7
 - CMU 15-445 Project 1 (Buffer Pool Manager)
 - CMU 15-445 Project 2 (B+Tree Index)
-- SQLite btree.c 소스 코드
+- SQLite btree.c 소스 코드 — 루트 split 시 루트 고정: `balance_deeper()`
+  https://github.com/sqlite/sqlite/blob/master/src/btree.c
+- PostgreSQL nbtree — 루트 split 시 새 루트 할당 + 메타페이지 갱신: `_bt_newlevel()`
+  https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtinsert.c

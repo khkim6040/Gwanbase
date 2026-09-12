@@ -97,6 +97,22 @@ class BPlusTreeTest {
     }
 
     @Test
+    fun `루트 split이 일어나도 rootPageId는 변하지 않는다`() {
+        val initialRoot = tree.rootPageId
+        val n = 500
+        for (i in 0 until n) {
+            tree.insert(formatKey(i), formatValue(i))
+        }
+
+        tree.rootPageId shouldBe initialRoot
+        // 외부(Catalog 등)가 기억한 rootPageId로 다시 열어도 모든 키를 찾아야 한다
+        val reopened = BPlusTree(bpm, initialRoot)
+        for (i in 0 until n) {
+            reopened.search(formatKey(i)) shouldBe formatValue(i)
+        }
+    }
+
+    @Test
     fun `임의 순서로 대량 삽입해도 모든 키가 조회되고 정렬 불변식이 유지된다`() {
         val n = 2000
         val indices = (0 until n).toMutableList()
