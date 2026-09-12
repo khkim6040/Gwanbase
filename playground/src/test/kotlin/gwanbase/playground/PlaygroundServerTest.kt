@@ -136,5 +136,6 @@ class PlaygroundServerTest {
         res.body() shouldContain "fetch('/query'"
         res.body() shouldContain "fetch('/schema')"
         res.body() shouldContain "fetch('/reset'"
+        res.body() shouldContain "aria-label=\"SQL 입력\""
     }
 }

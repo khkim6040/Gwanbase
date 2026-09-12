@@ -52,10 +52,10 @@
     <button class="danger" id="reset">초기화</button>
   </aside>
   <section>
-    <textarea id="sql" spellcheck="false" placeholder="SELECT * FROM users;  (Ctrl/Cmd+Enter로 실행)"></textarea>
+    <textarea id="sql" aria-label="SQL 입력" spellcheck="false" placeholder="SELECT * FROM users;  (Ctrl/Cmd+Enter로 실행)"></textarea>
     <div class="row">
       <button class="primary" id="run">실행</button>
-      <span class="badge" id="txn">I</span>
+      <span class="badge" id="txn" aria-live="polite">I</span>
       <span class="examples row" id="examples"></span>
     </div>
     <div id="history"></div>
@@ -146,7 +146,7 @@ async function run() {
   history.appendChild(entry);
   entry.scrollIntoView({ block: 'end' });
   setTxn(data.txn);
-  if (!data.columns) loadSchema();
+  if (!data.error && !data.columns) loadSchema();
 }
 
 $('run').onclick = run;
