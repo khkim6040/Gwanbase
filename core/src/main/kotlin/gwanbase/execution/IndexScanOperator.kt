@@ -1,16 +1,21 @@
 package gwanbase.execution
 
 import gwanbase.index.BPlusTree
+import gwanbase.index.KeyRange
 import gwanbase.index.KeySerializer
 import gwanbase.sql.Expression
 import gwanbase.table.*
 import gwanbase.txn.DatabaseSession
 
 /**
- * B+Tree 인덱스를 사용하여 등가 조건에 매칭하는 튜플을 스캔하는 연산자.
+ * B+Tree 인덱스로 [KeyRange] 범위에 매칭하는 튜플을 스캔하는 연산자.
  *
- * lookupKeySupplier로 검색 키를 동적으로 받을 수 있어
- * Index Nested Loop Join에서 outer 튜플에 따라 키가 바뀌는 경우를 지원한다.
+ * rangeSupplier로 범위를 동적으로 받을 수 있어 open() 재호출 시 다른 범위로
+ * 스캔할 수 있다. 등가 조건은 `KeyRange.equal(v)`로 표현한다.
+ *
+ * [filter]는 힙 튜플에서 다시 평가한다. 옵티마이저가 인덱스 조건을 필터에서 제거하지
+ * 않으므로 이 평가가 PostgreSQL의 recheck 역할을 한다:
+ * https://www.postgresql.org/docs/current/index-scanning.html
  */
 class IndexScanOperator(
     private val database: Database,
@@ -19,8 +24,8 @@ class IndexScanOperator(
     private val tree: BPlusTree,
     private val indexColumnIndex: Int,
     private val indexColumnType: DataType,
-    private val lookupKeySupplier: () -> Any?,
-    private val remainingFilter: Expression?,
+    private val rangeSupplier: () -> KeyRange?,
+    private val filter: Expression?,
     private val session: DatabaseSession? = null,
 ) : Operator {
 
@@ -29,13 +34,12 @@ class IndexScanOperator(
     override val outputSchema: Schema get() = schema
 
     override fun open() {
-        val lookupValue = lookupKeySupplier() ?: run {
+        val range = rangeSupplier() ?: run {
             matchedRids = emptyList<RID>().iterator()
             return
         }
-        val columnKey = KeySerializer.serializeKey(lookupValue, indexColumnType)
-        val endKey = KeySerializer.equalityScanEnd(columnKey)
-        val scanIter = tree.scan(columnKey, endKey)
+        val (startKey, endKey) = KeySerializer.scanBounds(range, indexColumnType)
+        val scanIter = tree.scan(startKey, endKey)
         val rids = mutableListOf<RID>()
         while (scanIter.hasNext()) {
             val (_, value) = scanIter.next()
@@ -51,8 +55,8 @@ class IndexScanOperator(
                 session.acquireSharedLock(tableName, rid)
             }
             val tuple = database.getTuple(tableName, rid) ?: continue
-            if (remainingFilter != null &&
-                !ExpressionEvaluator.evaluateCondition(schema, tuple, remainingFilter)
+            if (filter != null &&
+                !ExpressionEvaluator.evaluateCondition(schema, tuple, filter)
             ) {
                 continue
             }

@@ -1,6 +1,7 @@
 package gwanbase.execution
 
 import gwanbase.index.BPlusTree
+import gwanbase.index.KeyRange
 import gwanbase.index.KeySerializer
 import gwanbase.optimizer.PlanNode
 import gwanbase.sql.*
@@ -56,7 +57,8 @@ class Planner(
             val colType = schema.column(colIndex).type
             IndexScanOperator(
                 database, plan.tableName, schema, tree,
-                colIndex, colType, { evaluateLiteral(plan.lookupValue) },
+                colIndex, colType,
+                { evaluateLiteral(plan.lookupValue)?.let { KeyRange.equal(it) } },
                 plan.remainingFilter, session,
             )
         }
