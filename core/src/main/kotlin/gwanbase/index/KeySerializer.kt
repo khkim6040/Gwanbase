@@ -128,4 +128,34 @@ object KeySerializer {
         // 전부 0xFF인 경우: 한 바이트 더 긴 배열 반환
         return columnKey + byteArrayOf(0)
     }
+
+    /**
+     * 컬럼 값 범위를 B+Tree 복합 키 스캔 구간 `[startKey, endKey)`로 변환한다.
+     *
+     * 복합 키가 `컬럼값 + RID`이므로 컬럼값 자체의 successor([equalityScanEnd])가
+     * "그 값을 가진 모든 행 다음" 위치가 된다.
+     *
+     * | 조건    | startKey        | endKey          |
+     * |---------|-----------------|-----------------|
+     * | `>= v`  | v               | -               |
+     * | `> v`   | successor(v)    | -               |
+     * | `< v`   | 빈 배열         | v               |
+     * | `<= v`  | 빈 배열         | successor(v)    |
+     * | `= v`   | v               | successor(v)    |
+     *
+     * @return (startKey, endKey). endKey가 null이면 상한 없음
+     */
+    fun scanBounds(range: KeyRange, dataType: DataType): Pair<ByteArray, ByteArray?> {
+        val start = when {
+            range.lower == null -> ByteArray(0)
+            range.lowerInclusive -> serializeKey(range.lower, dataType)
+            else -> equalityScanEnd(serializeKey(range.lower, dataType))
+        }
+        val end = when {
+            range.upper == null -> null
+            range.upperInclusive -> equalityScanEnd(serializeKey(range.upper, dataType))
+            else -> serializeKey(range.upper, dataType)
+        }
+        return start to end
+    }
 }

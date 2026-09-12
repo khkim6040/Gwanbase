@@ -198,4 +198,50 @@ class KeySerializerTest {
             KeySerializer.deserializeRid(ByteArray(5))
         }
     }
+
+    // --- scanBounds: KeyRange → [startKey, endKey?) ---
+
+    private fun key(v: Int) = KeySerializer.serializeKey(v, DataType.INT32)
+    private fun succ(v: Int) = KeySerializer.equalityScanEnd(key(v))
+
+    @Test
+    fun `scanBounds - 등가는 값부터 successor 미만`() {
+        val (start, end) = KeySerializer.scanBounds(KeyRange.equal(5), DataType.INT32)
+        start shouldBe key(5)
+        end shouldBe succ(5)
+    }
+
+    @Test
+    fun `scanBounds - 포함 하한은 값부터, 상한 없음은 null`() {
+        val (start, end) = KeySerializer.scanBounds(KeyRange(5, true, null, false), DataType.INT32)
+        start shouldBe key(5)
+        end shouldBe null
+    }
+
+    @Test
+    fun `scanBounds - 제외 하한은 successor부터`() {
+        val (start, _) = KeySerializer.scanBounds(KeyRange(5, false, null, false), DataType.INT32)
+        start shouldBe succ(5)
+    }
+
+    @Test
+    fun `scanBounds - 하한 없음은 빈 배열부터, 제외 상한은 값 미만`() {
+        val (start, end) = KeySerializer.scanBounds(KeyRange(null, false, 9, false), DataType.INT32)
+        start shouldBe ByteArray(0)
+        end shouldBe key(9)
+    }
+
+    @Test
+    fun `scanBounds - 포함 상한은 successor 미만`() {
+        val (_, end) = KeySerializer.scanBounds(KeyRange(null, false, 9, true), DataType.INT32)
+        end shouldBe succ(9)
+    }
+
+    @Test
+    fun `scanBounds - VARCHAR 제외 하한이 접두사를 공유하는 더 긴 문자열을 포함한다`() {
+        // name > 'abc' 는 'abcd'를 포함해야 한다
+        val (start, _) = KeySerializer.scanBounds(KeyRange("abc", false, null, false), DataType.VARCHAR)
+        val abcd = KeySerializer.compositeKey(KeySerializer.serializeKey("abcd", DataType.VARCHAR), RID(0, 0))
+        compareBytes(abcd, start) shouldBeGreaterThan 0
+    }
 }
