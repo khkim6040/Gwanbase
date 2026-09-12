@@ -132,5 +132,9 @@ class PlaygroundServerTest {
         res.statusCode() shouldBe 200
         res.headers().firstValue("Content-Type").get() shouldContain "text/html"
         res.body() shouldContain "Gwanbase Playground"
+        res.body() shouldContain "id=\"sql\""
+        res.body() shouldContain "fetch('/query'"
+        res.body() shouldContain "fetch('/schema')"
+        res.body() shouldContain "fetch('/reset'"
     }
 }
