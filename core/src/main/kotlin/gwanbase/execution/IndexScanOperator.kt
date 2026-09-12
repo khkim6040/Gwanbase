@@ -16,6 +16,11 @@ import gwanbase.txn.DatabaseSession
  * [filter]는 힙 튜플에서 다시 평가한다. 옵티마이저가 인덱스 조건을 필터에서 제거하지
  * 않으므로 이 평가가 PostgreSQL의 recheck 역할을 한다:
  * https://www.postgresql.org/docs/current/index-scanning.html
+ *
+ * matchedRids는 [BPlusTree.scan]의 시퀀스를 lazy하게 순회한다 — open()에서 매칭 RID를
+ * 전부 리스트로 모으지 않으므로 결과가 많아도 open() 시점에 메모리를 미리 소비하지 않는다.
+ * BPlusTree.scan은 리프 페이지를 읽는 즉시 unpin하므로 next() 호출 사이에 페이지 pin을
+ * 들고 있지 않는다.
  */
 class IndexScanOperator(
     private val database: Database,
@@ -40,12 +45,7 @@ class IndexScanOperator(
         }
         val (startKey, endKey) = KeySerializer.scanBounds(range, indexColumnType)
         val scanIter = tree.scan(startKey, endKey)
-        val rids = mutableListOf<RID>()
-        while (scanIter.hasNext()) {
-            val (_, value) = scanIter.next()
-            rids.add(KeySerializer.deserializeRid(value))
-        }
-        matchedRids = rids.iterator()
+        matchedRids = scanIter.asSequence().map { KeySerializer.deserializeRid(it.second) }.iterator()
     }
 
     override fun next(): Tuple? {
