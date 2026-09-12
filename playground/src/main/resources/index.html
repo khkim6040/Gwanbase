@@ -68,7 +68,8 @@ const EXAMPLES = [
   ['EXPLAIN', 'EXPLAIN SELECT * FROM orders WHERE user_id = 3'],
   ['INSERT', "INSERT INTO users (id, name, age) VALUES (6, 'Frank', 52)"],
   ['UPDATE', 'UPDATE orders SET amount = amount + 10 WHERE user_id = 1'],
-  ['BEGIN…ROLLBACK', 'BEGIN'],
+  ['BEGIN', 'BEGIN'],
+  ['ROLLBACK', 'ROLLBACK'],
   ['UNIQUE 위반', "INSERT INTO users (id, name, age) VALUES (1, 'Dup', 1)"],
   ['FK 위반', 'INSERT INTO orders (id, user_id, amount) VALUES (9, 999, 1)'],
 ];

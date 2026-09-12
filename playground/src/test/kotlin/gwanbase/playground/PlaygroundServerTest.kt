@@ -73,6 +73,7 @@ class PlaygroundServerTest {
         val begin = query("BEGIN")
         val cookie = begin.sessionCookie()
         cookie shouldContain "gb_session="
+        begin.headers().firstValue("Set-Cookie").get() shouldContain "Secure"
         begin.body() shouldContain """"txn":"T""""
 
         query("SELECT * FROM nope", cookie).body() shouldContain """"txn":"E""""

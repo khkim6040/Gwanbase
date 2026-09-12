@@ -97,7 +97,7 @@ class PlaygroundServer(
         val sql = String(body, Charsets.UTF_8)
         resetLock.read {
             val (id, session) = sessions.acquire(ex.cookie(COOKIE_NAME))
-            ex.responseHeaders.add("Set-Cookie", "$COOKIE_NAME=$id; Path=/; HttpOnly; SameSite=Lax")
+            ex.responseHeaders.add("Set-Cookie", "$COOKIE_NAME=$id; Path=/; HttpOnly; Secure; SameSite=Lax")
             try {
                 val result = session.execute(sql)
                 ex.respond(200, Json.encode(Json.result(result, session.txnStatus, MAX_ROWS)))
