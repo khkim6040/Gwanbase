@@ -119,7 +119,7 @@ class SessionRegistry(
         var closed = 0
         for ((id, session) in sessions) {
             if (now - session.lastUsedAt > idleMillis && sessions.remove(id, session)) {
-                session.close()
+                runCatching { session.close() }
                 closed++
             }
         }
@@ -130,6 +130,6 @@ class SessionRegistry(
     fun closeAll() {
         val all = sessions.values.toList()
         sessions.clear()
-        all.forEach { it.close() }
+        all.forEach { runCatching { it.close() } }
     }
 }

@@ -55,7 +55,13 @@ class PlaygroundServer(
     /** HTTP 수신을 시작하고 1분 주기 idle 세션 회수를 예약한다. */
     fun start() {
         http.start()
-        evictor.scheduleAtFixedRate({ resetLock.read { sessions.evictIdle() } }, 1, 1, TimeUnit.MINUTES)
+        evictor.scheduleAtFixedRate({
+            try {
+                resetLock.read { sessions.evictIdle() }
+            } catch (e: Exception) {
+                logger.error(e) { "idle 세션 회수 실패" }
+            }
+        }, 1, 1, TimeUnit.MINUTES)
         logger.info { "Playground 시작: port=$port" }
     }
 
