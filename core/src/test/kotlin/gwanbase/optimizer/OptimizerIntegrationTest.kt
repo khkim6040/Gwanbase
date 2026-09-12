@@ -242,6 +242,22 @@ class OptimizerIntegrationTest {
         selectIds(sql) shouldBe listOf(2147483647)
     }
 
+    @Test
+    fun `INT32 컬럼에 Int 범위를 벗어난 상한 리터럴이 와도 행을 누락하지 않는다`() {
+        prepareIndexedUsers()
+        val sql = "SELECT id FROM users WHERE id > 1095 AND id < 3000000000"
+        explain(sql) shouldContain "IndexScan"
+        selectIds(sql) shouldBe listOf(1096, 1097, 1098, 1099, 1100)
+    }
+
+    @Test
+    fun `INT32 컬럼에 Int 범위 아래의 하한 리터럴은 경계를 버린다`() {
+        prepareIndexedUsers()
+        val sql = "SELECT id FROM users WHERE id > -3000000000 AND id < 4"
+        explain(sql) shouldContain "IndexScan"
+        selectIds(sql) shouldBe listOf(1, 2, 3)
+    }
+
     /** SQL 텍스트에서 파싱 + 바인딩한 Statement.Select를 반환한다. */
     private fun parseSelect(sql: String): Statement.Select {
         val tokens = Lexer(sql).tokenize()
