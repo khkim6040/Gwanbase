@@ -82,4 +82,15 @@ class SessionRegistryTest {
         registry.closeAll()
         registry.size shouldBe 0
     }
+
+    @Test
+    fun `기존 세션을 acquire하면 lastUsedAt이 갱신되어 회수 대상에서 벗어난다`() {
+        val (id, session) = registry.acquire(null)
+        session.lastUsedAt = 0L
+
+        registry.acquire(id)
+
+        registry.evictIdle(now = 5_000L) shouldBe 0
+        registry.size shouldBe 1
+    }
 }

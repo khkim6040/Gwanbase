@@ -98,11 +98,15 @@ class SessionRegistry(
 
     private val sessions = ConcurrentHashMap<String, PlaygroundSession>()
 
+    /** 현재 살아 있는 세션 수. */
     val size: Int get() = sessions.size
 
     /** [id]의 세션을 돌려주고, 없거나 회수됐으면 새로 만든다. first는 클라이언트에 줄 세션 ID다. */
     fun acquire(id: String?): Pair<String, PlaygroundSession> {
-        if (id != null) sessions[id]?.let { return id to it }
+        if (id != null) sessions[id]?.let {
+            it.lastUsedAt = System.currentTimeMillis()
+            return id to it
+        }
         val newId = UUID.randomUUID().toString()
         val dbSession = database().createSession().apply { lockTimeoutMillis = this@SessionRegistry.lockTimeoutMillis }
         val session = PlaygroundSession(dbSession)
