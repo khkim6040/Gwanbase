@@ -119,7 +119,7 @@ class KeySerializerTest {
         val abcdComposite = KeySerializer.compositeKey(
             KeySerializer.serializeKey("abcd", DataType.VARCHAR), RID(0, 0),
         )
-        compareBytes(abcdComposite, end) shouldBeGreaterThan 0
+        compareBytes(abcdComposite, end!!) shouldBeGreaterThan 0
     }
 
     @Test
@@ -243,5 +243,23 @@ class KeySerializerTest {
         val (start, _) = KeySerializer.scanBounds(KeyRange("abc", false, null, false), DataType.VARCHAR)
         val abcd = KeySerializer.compositeKey(KeySerializer.serializeKey("abcd", DataType.VARCHAR), RID(0, 0))
         compareBytes(abcd, start) shouldBeGreaterThan 0
+    }
+
+    // --- equalityScanEnd: 전부 0xFF인 키의 successor ---
+
+    @Test
+    fun `equalityScanEnd - 전부 0xFF인 키는 successor가 없어 null을 반환한다`() {
+        val int32Max = KeySerializer.serializeKey(Int.MAX_VALUE, DataType.INT32)
+        KeySerializer.equalityScanEnd(int32Max) shouldBe null
+
+        val int64Max = KeySerializer.serializeKey(Long.MAX_VALUE, DataType.INT64)
+        KeySerializer.equalityScanEnd(int64Max) shouldBe null
+    }
+
+    @Test
+    fun `scanBounds - INT32 최대값 등가는 상한 없음`() {
+        val (start, end) = KeySerializer.scanBounds(KeyRange.equal(Int.MAX_VALUE), DataType.INT32)
+        start shouldBe key(Int.MAX_VALUE)
+        end shouldBe null
     }
 }

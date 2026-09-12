@@ -113,9 +113,10 @@ object KeySerializer {
      * columnKey의 다음 키(lexicographic successor)를 반환한다.
      *
      * @param columnKey 등가 조건의 컬럼 값 바이트 배열
-     * @return columnKey보다 큰 가장 작은 접두사 바이트 배열
+     * @return columnKey보다 큰 가장 작은 접두사 바이트 배열. columnKey가 전부 0xFF라
+     *   successor가 존재하지 않으면(타입의 최대값) null을 반환한다 — 상한 없이 끝까지 스캔하라는 뜻이다.
      */
-    fun equalityScanEnd(columnKey: ByteArray): ByteArray {
+    fun equalityScanEnd(columnKey: ByteArray): ByteArray? {
         val end = columnKey.copyOf()
         for (i in end.indices.reversed()) {
             val next = (end[i].toInt() and 0xFF) + 1
@@ -125,8 +126,8 @@ object KeySerializer {
             }
             end[i] = 0
         }
-        // 전부 0xFF인 경우: 한 바이트 더 긴 배열 반환
-        return columnKey + byteArrayOf(0)
+        // 전부 0xFF인 경우: 이 접두사보다 큰 바이트 배열은 존재하지 않는다 (unsigned lexicographic 순서에서 최댓값).
+        return null
     }
 
     /**
@@ -143,13 +144,21 @@ object KeySerializer {
      * | `<= v`  | 빈 배열         | successor(v)    |
      * | `= v`   | v               | successor(v)    |
      *
+     * v가 타입 최대값(전부 0xFF)이라 successor가 없으면, endKey는 null(상한 없음)이 되고
+     * startKey(`> v`)는 그 무엇과도 매칭되지 않도록 가능한 가장 큰 복합 키보다 큰 값을 쓴다.
+     *
      * @return (startKey, endKey). endKey가 null이면 상한 없음
      */
     fun scanBounds(range: KeyRange, dataType: DataType): Pair<ByteArray, ByteArray?> {
         val start = when {
             range.lower == null -> ByteArray(0)
             range.lowerInclusive -> serializeKey(range.lower, dataType)
-            else -> equalityScanEnd(serializeKey(range.lower, dataType))
+            else -> {
+                val lowerKey = serializeKey(range.lower, dataType)
+                // successor가 없으면(하한이 타입 최대값) 그보다 큰 값은 존재하지 않는다.
+                // RID까지 포함해 이론상 가능한 가장 큰 복합 키보다도 큰 시작점을 줘서 빈 스캔이 되게 한다.
+                equalityScanEnd(lowerKey) ?: (lowerKey + ByteArray(6) { 0xFF.toByte() })
+            }
         }
         val end = when {
             range.upper == null -> null

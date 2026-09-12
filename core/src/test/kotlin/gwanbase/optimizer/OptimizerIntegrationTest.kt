@@ -231,6 +231,17 @@ class OptimizerIntegrationTest {
         explain("SELECT id FROM users WHERE id = 500") shouldContain "key=500"
     }
 
+    @Test
+    fun `Int 최대값 등가 조건이 IndexScan으로 행을 찾는다`() {
+        prepareIndexedUsers()
+        database.executeSql("INSERT INTO users (id, name, age) VALUES (2147483647, 'max', 1)")
+        database.executeSql("ANALYZE users")
+
+        val sql = "SELECT id FROM users WHERE id = 2147483647"
+        explain(sql) shouldContain "IndexScan"
+        selectIds(sql) shouldBe listOf(2147483647)
+    }
+
     /** SQL 텍스트에서 파싱 + 바인딩한 Statement.Select를 반환한다. */
     private fun parseSelect(sql: String): Statement.Select {
         val tokens = Lexer(sql).tokenize()
