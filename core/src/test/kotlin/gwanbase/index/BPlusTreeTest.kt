@@ -214,6 +214,30 @@ class BPlusTreeTest {
         result shouldBe emptyList()
     }
 
+    @Test
+    fun `scan의 end가 null이면 start 이상 전체를 리프 경계를 넘어 반환한다`() {
+        for (i in 0 until 300) {
+            tree.insert(formatKey(i), formatValue(i))
+        }
+
+        val result = tree.scan(formatKey(250), null).asSequence().toList()
+
+        result.size shouldBe 50
+        result.first().first shouldBe formatKey(250)
+        result.last().first shouldBe formatKey(299)
+    }
+
+    @Test
+    fun `scan의 start가 빈 배열이고 end가 null이면 전체를 반환한다`() {
+        for (i in 0 until 20) {
+            tree.insert(formatKey(i), formatValue(i))
+        }
+
+        val result = tree.scan(ByteArray(0), null).asSequence().toList()
+
+        result.size shouldBe 20
+    }
+
     private fun formatKey(i: Int): ByteArray = "key-%06d".format(i).toByteArray()
     private fun formatValue(i: Int): ByteArray = "value-%06d".format(i).toByteArray()
 }
