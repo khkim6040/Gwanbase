@@ -22,6 +22,8 @@ private val logger = KotlinLogging.logger {}
  * - 1분마다 idle 세션을 회수한다.
  *
  * @param port 0이면 임의 포트. 실제 포트는 [port] 프로퍼티로 읽는다.
+ * @param lockTimeoutMillis 세션별 잠금 대기 상한(ms)
+ * @param idleMillis 이 시간 동안 요청이 없는 세션을 회수한다(ms)
  */
 class PlaygroundServer(
     private val engine: Engine,
@@ -50,6 +52,7 @@ class PlaygroundServer(
         }
     }
 
+    /** HTTP 수신을 시작하고 1분 주기 idle 세션 회수를 예약한다. */
     fun start() {
         http.start()
         evictor.scheduleAtFixedRate({ resetLock.read { sessions.evictIdle() } }, 1, 1, TimeUnit.MINUTES)
@@ -117,6 +120,7 @@ class PlaygroundServer(
         responseBody.use { it.write(bytes) }
     }
 
+    /** 회수 스케줄러와 HTTP 서버를 즉시 멈추고 모든 세션을 닫는다. 진행 중인 요청은 기다리지 않는다. */
     override fun close() {
         evictor.shutdownNow()
         http.stop(0)
