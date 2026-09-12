@@ -57,9 +57,8 @@ class Planner(
             val colType = schema.column(colIndex).type
             IndexScanOperator(
                 database, plan.tableName, schema, tree,
-                colIndex, colType,
-                { evaluateLiteral(plan.lookupValue)?.let { KeyRange.equal(it) } },
-                plan.remainingFilter, session,
+                colIndex, colType, { toKeyRange(plan) },
+                plan.filter, session,
             )
         }
         is PlanNode.NestedLoopJoin -> {
@@ -151,7 +150,20 @@ class Planner(
     }
 
     /**
-     * 리터럴 표현식을 Kotlin 값으로 평가한다 (인덱스 lookup 키 용).
+     * 계획 노드의 경계 리터럴을 평가해 [KeyRange]로 만든다.
+     * 경계 중 하나라도 NULL이면 비교 결과가 항상 UNKNOWN이므로 null(빈 결과)을 반환한다.
+     */
+    private fun toKeyRange(plan: PlanNode.IndexScan): KeyRange? {
+        val lower = plan.lowerBound?.let { evaluateLiteral(it.value) ?: return null }
+        val upper = plan.upperBound?.let { evaluateLiteral(it.value) ?: return null }
+        return KeyRange(
+            lower, plan.lowerBound?.inclusive ?: false,
+            upper, plan.upperBound?.inclusive ?: false,
+        )
+    }
+
+    /**
+     * 리터럴 표현식을 Kotlin 값으로 평가한다 (인덱스 경계 값 용).
      */
     private fun evaluateLiteral(expr: Expression): Any? = when (expr) {
         is Expression.IntLiteral -> expr.value

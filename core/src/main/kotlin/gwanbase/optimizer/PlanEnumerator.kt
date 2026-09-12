@@ -38,9 +38,10 @@ class PlanEnumerator(private val catalog: Catalog) {
                 val matchedRows = max(1, (rowCount * sel).toLong())
                 val idxCost = CostEstimator.indexScanCost(matchedRows)
                 if (idxCost < seqCost) {
+                    val bound = Bound(eqColumn.second, inclusive = true)
                     return PlanNode.IndexScan(
                         tableName, matchingIndex.name, matchingIndex.columnName,
-                        eqColumn.second, removeCondition(filter, eqColumn.first),
+                        bound, bound, removeCondition(filter, eqColumn.first),
                         matchedRows, idxCost,
                     )
                 }

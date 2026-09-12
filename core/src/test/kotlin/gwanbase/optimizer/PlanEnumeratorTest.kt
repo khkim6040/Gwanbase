@@ -46,6 +46,8 @@ class PlanEnumeratorTest {
         plan.shouldBeInstanceOf<PlanNode.IndexScan>()
         plan.indexName shouldBe "idx_users_id"
         plan.indexColumnName shouldBe "id"
+        plan.lowerBound shouldBe Bound(gwanbase.sql.Expression.IntLiteral(42), true)
+        plan.upperBound shouldBe plan.lowerBound
     }
 
     @Test
