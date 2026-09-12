@@ -47,4 +47,13 @@ class EngineTest {
 
         Engine(path).use { engine -> count(engine, "users") shouldBe 5 }
     }
+
+    @Test
+    fun `reset은 이전 DB가 이미 닫혀 있어도 새 DB를 연다`() {
+        Engine(tempDir.resolve("pg.db")).use { engine ->
+            engine.database.close()
+            engine.reset()
+            count(engine, "users") shouldBe 5
+        }
+    }
 }

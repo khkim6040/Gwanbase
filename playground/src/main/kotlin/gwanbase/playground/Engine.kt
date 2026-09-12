@@ -20,14 +20,24 @@ class Engine(private val path: Path) : AutoCloseable {
 
     /** 현재 DB를 닫고 파일을 지운 뒤 샘플 상태로 다시 연다. 호출자가 다른 요청을 막아야 한다. */
     fun reset() {
-        database.close()
-        database = openFresh()
+        try {
+            database.close()
+        } finally {
+            database = openFresh()
+        }
     }
 
     private fun openFresh(): Database {
         Files.deleteIfExists(path)
         Files.deleteIfExists(path.resolveSibling(path.fileName.toString() + ".wal"))
-        return Database.open(path).also { SampleData.load(it) }
+        val db = Database.open(path)
+        try {
+            SampleData.load(db)
+        } catch (e: Exception) {
+            db.close()
+            throw e
+        }
+        return db
     }
 
     override fun close() = database.close()
