@@ -1,10 +1,12 @@
 package gwanbase.execution
 
 import gwanbase.index.BPlusTree
+import gwanbase.index.KeyRange
 import gwanbase.index.KeySerializer
 import gwanbase.optimizer.PlanNode
 import gwanbase.sql.*
 import gwanbase.table.Database
+import gwanbase.table.DataType
 import gwanbase.table.Schema
 import gwanbase.txn.DatabaseSession
 
@@ -56,8 +58,8 @@ class Planner(
             val colType = schema.column(colIndex).type
             IndexScanOperator(
                 database, plan.tableName, schema, tree,
-                colIndex, colType, { evaluateLiteral(plan.lookupValue) },
-                plan.remainingFilter, session,
+                colIndex, colType, { toKeyRange(plan, colType) },
+                plan.filter, session,
             )
         }
         is PlanNode.NestedLoopJoin -> {
@@ -149,7 +151,36 @@ class Planner(
     }
 
     /**
-     * 리터럴 표현식을 Kotlin 값으로 평가한다 (인덱스 lookup 키 용).
+     * 계획 노드의 경계 리터럴을 평가해 [KeyRange]로 만든다.
+     * 경계 중 하나라도 NULL이면 비교 결과가 항상 UNKNOWN이므로 null(빈 결과)을 반환한다.
+     *
+     * Binder는 비교 연산자 피연산자의 타입을 검사하지 않으므로, INT32 컬럼에
+     * `id < 3000000000`처럼 Int 범위를 벗어난 Long 리터럴이 그대로 내려올 수 있다.
+     * [KeySerializer.serializeKey]의 INT32 분기는 `Long.toInt()`로 값을 자르므로
+     * 이런 리터럴을 그대로 키로 쓰면 랩어라운드되어 start가 end보다 커지는 등
+     * 스캔 구간이 뒤집혀 행이 누락된다. 그 경계는 버리고(무제한으로 확장)
+     * [IndexScanOperator]의 filter가 힙 튜플마다 원래 Long 비교로 재검사하게 맡긴다 —
+     * 범위를 넓히는 방향이라 결과 누락이 없다.
+     */
+    private fun toKeyRange(plan: PlanNode.IndexScan, colType: DataType): KeyRange? {
+        val lower = plan.lowerBound?.let { evaluateLiteral(it.value) ?: return null }
+        val upper = plan.upperBound?.let { evaluateLiteral(it.value) ?: return null }
+        val lowerInRange = boundInRange(lower, colType)
+        val upperInRange = boundInRange(upper, colType)
+        return KeyRange(
+            if (lowerInRange) lower else null, if (lowerInRange) plan.lowerBound?.inclusive ?: false else false,
+            if (upperInRange) upper else null, if (upperInRange) plan.upperBound?.inclusive ?: false else false,
+        )
+    }
+
+    /** INT32 컬럼인데 값이 Int 범위를 벗어나면 false. 그 외 타입/값은 항상 true. */
+    private fun boundInRange(value: Any?, colType: DataType): Boolean {
+        if (colType != DataType.INT32 || value !is Long) return true
+        return value in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()
+    }
+
+    /**
+     * 리터럴 표현식을 Kotlin 값으로 평가한다 (인덱스 경계 값 용).
      */
     private fun evaluateLiteral(expr: Expression): Any? = when (expr) {
         is Expression.IntLiteral -> expr.value

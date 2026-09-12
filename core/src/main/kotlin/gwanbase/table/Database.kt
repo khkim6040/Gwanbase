@@ -395,6 +395,9 @@ class Database private constructor(
     private fun findRidByColumnKey(tree: BPlusTree, columnKey: ByteArray, selfRid: RID?): RID? {
         // 검사와 삽입 사이에 다른 스레드가 끼어들 수 있다. B+Tree 자체가 아직 동시 쓰기에
         // 안전하지 않으므로 같은 한계로 두고, B+Tree 래치 도입 시 함께 해결한다.
+        // equalityScanEnd가 null이면 columnKey가 컬럼 타입의 최대값(전부 0xFF)이라는 뜻이다.
+        // 이 값은 그 인덱스에서 가능한 가장 큰 컬럼 값이므로 트리에 남은 모든 키가 같은
+        // columnKey 접두사를 공유한다 — 상한 없이 끝까지 스캔해도 정확하다.
         val iter = tree.scan(columnKey, KeySerializer.equalityScanEnd(columnKey))
         while (iter.hasNext()) {
             val rid = KeySerializer.deserializeRid(iter.next().second)

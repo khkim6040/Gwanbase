@@ -21,16 +21,34 @@ sealed class PlanNode {
         override val estimatedCost: Double,
     ) : PlanNode()
 
-    /** 인덱스 스캔. */
+    /**
+     * 인덱스 스캔. [lowerBound]/[upperBound]가 컬럼 값 범위를 정하고,
+     * [filter]는 힙 튜플에서 재검사할 전체 WHERE 조건이다 (인덱스 조건 포함).
+     */
     data class IndexScan(
         val tableName: String,
         val indexName: String,
         val indexColumnName: String,
-        val lookupValue: Expression,
-        val remainingFilter: Expression?,
+        val lowerBound: Bound?,
+        val upperBound: Bound?,
+        val filter: Expression?,
         override val estimatedRows: Long,
         override val estimatedCost: Double,
-    ) : PlanNode()
+    ) : PlanNode() {
+        /** 등가 조건 여부: 양쪽 경계가 같은 값이고 모두 포함. */
+        val isEquality: Boolean
+            get() = lowerBound != null && upperBound != null &&
+                lowerBound.inclusive && upperBound.inclusive &&
+                lowerBound.value == upperBound.value
+
+        /** EXPLAIN용 범위 텍스트. */
+        internal fun describeRange(): String {
+            if (isEquality) return "key=${lowerBound!!.value.toSql()}"
+            val lo = lowerBound?.let { (if (it.inclusive) "[" else "(") + it.value.toSql() } ?: "(-inf"
+            val hi = upperBound?.let { it.value.toSql() + (if (it.inclusive) "]" else ")") } ?: "+inf)"
+            return "range=$lo, $hi"
+        }
+    }
 
     /** Nested Loop Join. */
     data class NestedLoopJoin(
@@ -74,7 +92,8 @@ sealed class PlanNode {
         val line = when (this) {
             is SeqScan -> "${prefix}SeqScan(table=$tableName${if (filter != null) ", filter=$filter" else ""})" +
                 "  rows=$estimatedRows cost=${"%.1f".format(estimatedCost)}"
-            is IndexScan -> "${prefix}IndexScan(table=$tableName, index=$indexName, key=$lookupValue)" +
+            is IndexScan -> "${prefix}IndexScan(table=$tableName, index=$indexName, " +
+                "${describeRange()}${if (filter != null) ", filter=$filter" else ""})" +
                 "  rows=$estimatedRows cost=${"%.1f".format(estimatedCost)}"
             is NestedLoopJoin -> "${prefix}NestedLoopJoin(on=$condition)" +
                 "  rows=$estimatedRows cost=${"%.1f".format(estimatedCost)}"
@@ -96,3 +115,11 @@ sealed class PlanNode {
         else line + "\n" + children.joinToString("\n") { it.explain(indent + 1) }
     }
 }
+
+/**
+ * 인덱스 스캔 경계.
+ *
+ * @param value 리터럴 표현식 (Planner가 실행 시점에 값으로 평가)
+ * @param inclusive 경계 포함 여부 (`>=`/`<=`이면 true, `>`/`<`이면 false)
+ */
+data class Bound(val value: Expression, val inclusive: Boolean)

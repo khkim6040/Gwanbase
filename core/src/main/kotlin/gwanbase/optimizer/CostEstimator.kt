@@ -15,8 +15,18 @@ object CostEstimator {
     /** 통계 없을 때 등가 조건 기본 선택도. */
     const val DEFAULT_EQUALITY_SELECTIVITY = 0.1
 
-    /** 통계 없을 때 범위 조건 기본 선택도. */
-    const val DEFAULT_RANGE_SELECTIVITY = 0.33
+    /**
+     * 통계 없을 때 단방향 범위 조건(`col > v`)의 기본 선택도.
+     * PostgreSQL `DEFAULT_INEQ_SEL`과 같은 값:
+     * https://github.com/postgres/postgres/blob/master/src/include/utils/selfuncs.h
+     */
+    const val DEFAULT_RANGE_SELECTIVITY = 1.0 / 3
+
+    /**
+     * 통계 없을 때 양방향 범위 조건(`col > a AND col < b`)의 기본 선택도.
+     * PostgreSQL `DEFAULT_RANGE_INEQ_SEL`과 같은 값.
+     */
+    const val DEFAULT_TWO_SIDED_RANGE_SELECTIVITY = 0.005
 
     /** 기타 조건의 기본 선택도. */
     const val DEFAULT_OTHER_SELECTIVITY = 0.5
@@ -32,16 +42,28 @@ object CostEstimator {
     }
 
     /**
-     * 범위 조건(col > threshold)의 선택도를 추정한다.
+     * 범위 조건의 선택도를 추정한다.
      *
-     * 균등 분포를 가정하여 (max - threshold) / (max - min)으로 계산한다.
+     * 통계의 min/max 사이에 값이 균등 분포한다고 가정하고
+     * `(min(upper, max) - max(lower, min)) / (max - min)`을 [0, 1]로 clamp한다.
+     * 경계 포함 여부는 무시한다. PostgreSQL은 히스토그램으로 각 경계의 선택도를 구한 뒤
+     * `hisel + losel - 1`로 결합한다(`clauselist_selectivity_ext()`):
+     * https://github.com/postgres/postgres/blob/master/src/backend/optimizer/path/clausesel.c
+     *
+     * @param lower 하한 (null이면 없음)
+     * @param upper 상한 (null이면 없음)
+     * @throws IllegalArgumentException 경계가 둘 다 없을 때
      */
-    fun rangeSelectivity(stats: ColumnStats?, threshold: Long): Double {
-        if (stats == null || stats.minValue == null || stats.maxValue == null) return DEFAULT_RANGE_SELECTIVITY
-        val min = stats.minValue as Long
-        val max = stats.maxValue as Long
-        if (max == min) return DEFAULT_RANGE_SELECTIVITY
-        return max(0.0, (max - threshold).toDouble() / (max - min).toDouble())
+    fun rangeSelectivity(stats: ColumnStats?, lower: Long?, upper: Long?): Double {
+        require(lower != null || upper != null) { "범위 조건에는 경계가 하나 이상 있어야 한다" }
+        val default = if (lower != null && upper != null) DEFAULT_TWO_SIDED_RANGE_SELECTIVITY
+        else DEFAULT_RANGE_SELECTIVITY
+        val min = stats?.minValue as? Long ?: return default
+        val max = stats.maxValue as? Long ?: return default
+        if (max == min) return default
+        val lo = max(lower ?: min, min)
+        val hi = minOf(upper ?: max, max)
+        return ((hi - lo).toDouble() / (max - min).toDouble()).coerceIn(0.0, 1.0)
     }
 
     /**

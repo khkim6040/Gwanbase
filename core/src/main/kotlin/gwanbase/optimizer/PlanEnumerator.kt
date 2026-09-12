@@ -2,6 +2,7 @@ package gwanbase.optimizer
 
 import gwanbase.sql.*
 import gwanbase.table.Catalog
+import gwanbase.table.ColumnStats
 import kotlin.math.max
 
 /**
@@ -15,8 +16,14 @@ class PlanEnumerator(private val catalog: Catalog) {
     /**
      * 단일 테이블의 최적 접근 경로를 선택한다.
      *
-     * 필터가 등가 조건이고 해당 컬럼에 인덱스가 있으면 IndexScan과 SeqScan의
-     * 비용을 비교하여 더 저렴한 쪽을 선택한다.
+     * WHERE의 AND 체인에서 `col OP literal` 조건을 모아 인덱스 컬럼별 하한·상한 경계를
+     * 만들고, 각 인덱스 경로의 비용을 SeqScan과 비교해 가장 저렴한 계획을 고른다.
+     * 인덱스 조건은 필터에서 제거하지 않는다. 실행기가 힙 튜플에서 전체 필터를 다시
+     * 평가하므로(recheck) 경계가 넓어도 결과는 정확하다.
+     *
+     * PostgreSQL `match_opclause_to_indexcol()`은 `indexkey OP const` 꼴만 인덱스 조건으로
+     * 받고 `const OP indexkey`는 commutator로 뒤집는다:
+     * https://github.com/postgres/postgres/blob/master/src/backend/optimizer/path/indxpath.c
      *
      * @param tableName 대상 테이블
      * @param filter WHERE 조건 (null이면 전체 스캔)
@@ -25,30 +32,109 @@ class PlanEnumerator(private val catalog: Catalog) {
     fun bestAccessPath(tableName: String, filter: Expression?): PlanNode {
         val rowCount = catalog.getRowCount(tableName)
         val seqCost = CostEstimator.seqScanCost(rowCount)
-
         if (filter == null) return PlanNode.SeqScan(tableName, null, rowCount, seqCost)
 
-        val eqColumn = extractEqualityColumn(filter)
-        if (eqColumn != null) {
-            val indexes = catalog.getIndexesForTable(tableName)
-            val matchingIndex = indexes.find { it.columnName == eqColumn.first }
-            if (matchingIndex != null) {
-                val colStats = catalog.getColumnStats(tableName, eqColumn.first)
-                val sel = CostEstimator.equalitySelectivity(colStats)
-                val matchedRows = max(1, (rowCount * sel).toLong())
-                val idxCost = CostEstimator.indexScanCost(matchedRows)
-                if (idxCost < seqCost) {
-                    return PlanNode.IndexScan(
-                        tableName, matchingIndex.name, matchingIndex.columnName,
-                        eqColumn.second, removeCondition(filter, eqColumn.first),
-                        matchedRows, idxCost,
-                    )
-                }
+        val conditions = collectIndexConditions(filter)
+        var best: PlanNode = PlanNode.SeqScan(
+            tableName, filter, estimateFilteredRows(tableName, conditions, rowCount), seqCost,
+        )
+        for (index in catalog.getIndexesForTable(tableName)) {
+            val (lower, upper) = indexRange(conditions, index.columnName) ?: continue
+            val stats = catalog.getColumnStats(tableName, index.columnName)
+            val rows = max(1, (rowCount * rangeSelectivity(lower, upper, stats)).toLong())
+            val cost = CostEstimator.indexScanCost(rows)
+            if (cost < best.estimatedCost) {
+                best = PlanNode.IndexScan(tableName, index.name, index.columnName, lower, upper, filter, rows, cost)
             }
         }
+        return best
+    }
 
-        val filteredRows = estimateFilteredRows(tableName, filter, rowCount)
-        return PlanNode.SeqScan(tableName, filter, filteredRows, seqCost)
+    /** 인덱스 조건 후보. 컬럼이 왼쪽에 오도록 연산자를 정규화한 상태. */
+    private data class IndexCondition(val column: String, val op: BinaryOperator, val literal: Expression)
+
+    /** AND 체인에서 `col OP literal` 또는 `literal OP col` 꼴 조건을 모은다. OP는 =, <, <=, >, >=. */
+    private fun collectIndexConditions(expr: Expression): List<IndexCondition> {
+        if (expr !is Expression.BinaryOp) return emptyList()
+        if (expr.op == BinaryOperator.AND) {
+            return collectIndexConditions(expr.left) + collectIndexConditions(expr.right)
+        }
+        if (expr.op !in RANGE_OPERATORS) return emptyList()
+        val left = expr.left
+        val right = expr.right
+        return when {
+            left is Expression.ColumnRef && isLiteral(right) -> listOf(IndexCondition(left.name, expr.op, right))
+            right is Expression.ColumnRef && isLiteral(left) -> listOf(IndexCondition(right.name, commute(expr.op), left))
+            else -> emptyList()
+        }
+    }
+
+    private fun isLiteral(expr: Expression): Boolean =
+        expr is Expression.IntLiteral || expr is Expression.StringLiteral ||
+            expr is Expression.BoolLiteral || expr is Expression.FloatLiteral
+
+    /** `literal OP col`을 `col OP' literal`로 바꿀 때의 OP'. */
+    private fun commute(op: BinaryOperator): BinaryOperator = when (op) {
+        BinaryOperator.LT -> BinaryOperator.GT
+        BinaryOperator.GT -> BinaryOperator.LT
+        BinaryOperator.LTE -> BinaryOperator.GTE
+        BinaryOperator.GTE -> BinaryOperator.LTE
+        else -> op
+    }
+
+    /**
+     * 컬럼의 하한·상한 경계를 만든다. 조건이 하나도 없으면 null.
+     *
+     * 같은 방향 경계가 여럿이면 첫 번째를 쓴다(재검사가 정확성을 보장). 등가는 항상
+     * 가장 좁으므로 앞선 경계를 덮어쓴다. PostgreSQL `_bt_preprocess_keys()`는 더 좁은
+     * 쪽을 고르지만 리터럴 비교 코드를 줄이기 위해 단순화했다:
+     * https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtutils.c
+     */
+    private fun indexRange(conditions: List<IndexCondition>, column: String): Pair<Bound?, Bound?>? {
+        var lower: Bound? = null
+        var upper: Bound? = null
+        for (cond in conditions) {
+            if (cond.column != column) continue
+            when (cond.op) {
+                BinaryOperator.EQ -> {
+                    lower = Bound(cond.literal, true)
+                    upper = Bound(cond.literal, true)
+                }
+                BinaryOperator.GT -> lower = lower ?: Bound(cond.literal, false)
+                BinaryOperator.GTE -> lower = lower ?: Bound(cond.literal, true)
+                BinaryOperator.LT -> upper = upper ?: Bound(cond.literal, false)
+                BinaryOperator.LTE -> upper = upper ?: Bound(cond.literal, true)
+                else -> {}
+            }
+        }
+        if (lower == null && upper == null) return null
+        return lower to upper
+    }
+
+    /** 경계 쌍의 선택도. 등가면 등가 선택도, 정수 경계면 통계 기반, 그 외는 기본값. */
+    private fun rangeSelectivity(lower: Bound?, upper: Bound?, stats: ColumnStats?): Double {
+        val isEquality = lower != null && upper != null &&
+            lower.inclusive && upper.inclusive && lower.value == upper.value
+        if (isEquality) return CostEstimator.equalitySelectivity(stats)
+        val lo = (lower?.value as? Expression.IntLiteral)?.value
+        val hi = (upper?.value as? Expression.IntLiteral)?.value
+        if (lo == null && hi == null) {
+            // VARCHAR 등 비정수 경계: 통계가 없으므로 기본값
+            return if (lower != null && upper != null) CostEstimator.DEFAULT_TWO_SIDED_RANGE_SELECTIVITY
+            else CostEstimator.DEFAULT_RANGE_SELECTIVITY
+        }
+        return CostEstimator.rangeSelectivity(stats, lo, hi)
+    }
+
+    /** 필터 적용 후 예상 행 수. 인덱스 조건이 있는 컬럼 중 가장 좁은 선택도를 쓴다. */
+    private fun estimateFilteredRows(tableName: String, conditions: List<IndexCondition>, totalRows: Long): Long {
+        val selectivities = conditions.map { it.column }.distinct().mapNotNull { column ->
+            indexRange(conditions, column)?.let { (lower, upper) ->
+                rangeSelectivity(lower, upper, catalog.getColumnStats(tableName, column))
+            }
+        }
+        val sel = selectivities.minOrNull() ?: CostEstimator.DEFAULT_OTHER_SELECTIVITY
+        return max(1, (totalRows * sel).toLong())
     }
 
     /**
@@ -98,44 +184,9 @@ class PlanEnumerator(private val catalog: Catalog) {
         return PlanNode.NestedLoopJoin(outer, inner, condition, rows, cost)
     }
 
-    /**
-     * 등가 조건 col = literal을 추출한다.
-     *
-     * @return (컬럼명, 리터럴 표현식) 쌍, 또는 등가 조건이 아니면 null
-     */
-    private fun extractEqualityColumn(expr: Expression): Pair<String, Expression>? {
-        if (expr !is Expression.BinaryOp || expr.op != BinaryOperator.EQ) return null
-        if (expr.left is Expression.ColumnRef && expr.right !is Expression.ColumnRef)
-            return (expr.left as Expression.ColumnRef).name to expr.right
-        if (expr.right is Expression.ColumnRef && expr.left !is Expression.ColumnRef)
-            return (expr.right as Expression.ColumnRef).name to expr.left
-        return null
-    }
-
-    /**
-     * AND 조건에서 특정 컬럼의 등가 조건을 제거한다.
-     *
-     * 인덱스가 처리하는 조건을 제외하고 나머지 필터만 남긴다.
-     */
-    private fun removeCondition(expr: Expression, columnName: String): Expression? {
-        val eq = extractEqualityColumn(expr)
-        if (eq != null && eq.first == columnName) return null
-        if (expr is Expression.BinaryOp && expr.op == BinaryOperator.AND) {
-            val leftEq = extractEqualityColumn(expr.left)
-            val rightEq = extractEqualityColumn(expr.right)
-            if (leftEq != null && leftEq.first == columnName) return expr.right
-            if (rightEq != null && rightEq.first == columnName) return expr.left
-        }
-        return expr
-    }
-
-    /** 필터 적용 후 예상 행 수를 추정한다. */
-    private fun estimateFilteredRows(tableName: String, filter: Expression, totalRows: Long): Long {
-        val eq = extractEqualityColumn(filter)
-        if (eq != null) {
-            val stats = catalog.getColumnStats(tableName, eq.first)
-            return max(1, (totalRows * CostEstimator.equalitySelectivity(stats)).toLong())
-        }
-        return max(1, (totalRows * CostEstimator.DEFAULT_OTHER_SELECTIVITY).toLong())
+    private companion object {
+        val RANGE_OPERATORS = setOf(
+            BinaryOperator.EQ, BinaryOperator.LT, BinaryOperator.LTE, BinaryOperator.GT, BinaryOperator.GTE,
+        )
     }
 }

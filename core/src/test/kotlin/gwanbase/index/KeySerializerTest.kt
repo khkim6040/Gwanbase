@@ -5,7 +5,10 @@ import gwanbase.table.RID
 import io.kotest.matchers.comparables.shouldBeGreaterThan
 import io.kotest.matchers.comparables.shouldBeLessThan
 import io.kotest.matchers.shouldBe
+import io.kotest.property.Arb
+import io.kotest.property.arbitrary.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 
 class KeySerializerTest {
 
@@ -107,6 +110,50 @@ class KeySerializerTest {
         compareBytes(empty, nonEmpty) shouldBeLessThan 0
     }
 
+    @Test
+    fun `VARCHAR - 등가 스캔 구간이 접두사를 공유하는 더 긴 문자열을 포함하지 않는다`() {
+        // 'abc' 등가 스캔 구간은 [abc, successor(abc)) 이다.
+        // 'abcd' + RID 복합 키가 이 구간 밖(뒤)에 있어야 한다.
+        val abc = KeySerializer.serializeKey("abc", DataType.VARCHAR)
+        val end = KeySerializer.equalityScanEnd(abc)
+        val abcdComposite = KeySerializer.compositeKey(
+            KeySerializer.serializeKey("abcd", DataType.VARCHAR), RID(0, 0),
+        )
+        compareBytes(abcdComposite, end!!) shouldBeGreaterThan 0
+    }
+
+    @Test
+    fun `VARCHAR - 접두사 복합 키가 더 긴 문자열 복합 키보다 앞에 온다`() {
+        // RID 바이트가 문자열 바이트보다 클 수 있어도 순서가 뒤집히지 않아야 한다.
+        val abc = KeySerializer.compositeKey(
+            KeySerializer.serializeKey("abc", DataType.VARCHAR), RID(Int.MAX_VALUE, 0xFFFF),
+        )
+        val abcd = KeySerializer.compositeKey(
+            KeySerializer.serializeKey("abcd", DataType.VARCHAR), RID(0, 0),
+        )
+        compareBytes(abc, abcd) shouldBeLessThan 0
+    }
+
+    @Test
+    fun `VARCHAR - NUL 문자를 포함하면 예외`() {
+        assertThrows<IllegalArgumentException> {
+            KeySerializer.serializeKey("a\u0000b", DataType.VARCHAR)
+        }
+    }
+
+    @Test
+    fun `VARCHAR - 복합 키 순서가 문자열 순서와 일치한다 (property)`() {
+        // 영숫자만 쓰면 UTF-16 비교(String.compareTo)와 UTF-8 바이트 순서가 같다.
+        val strings = Arb.string(0..8, Codepoint.alphanumeric()).take(300).toList()
+        val rid = RID(123, 45)
+        for (a in strings) for (b in strings) {
+            if (a == b) continue
+            val ka = KeySerializer.compositeKey(KeySerializer.serializeKey(a, DataType.VARCHAR), rid)
+            val kb = KeySerializer.compositeKey(KeySerializer.serializeKey(b, DataType.VARCHAR), rid)
+            Integer.signum(compareBytes(ka, kb)) shouldBe Integer.signum(a.compareTo(b))
+        }
+    }
+
     // --- BOOLEAN ---
 
     @Test
@@ -150,5 +197,69 @@ class KeySerializerTest {
         org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
             KeySerializer.deserializeRid(ByteArray(5))
         }
+    }
+
+    // --- scanBounds: KeyRange → [startKey, endKey?) ---
+
+    private fun key(v: Int) = KeySerializer.serializeKey(v, DataType.INT32)
+    private fun succ(v: Int) = KeySerializer.equalityScanEnd(key(v))
+
+    @Test
+    fun `scanBounds - 등가는 값부터 successor 미만`() {
+        val (start, end) = KeySerializer.scanBounds(KeyRange.equal(5), DataType.INT32)
+        start shouldBe key(5)
+        end shouldBe succ(5)
+    }
+
+    @Test
+    fun `scanBounds - 포함 하한은 값부터, 상한 없음은 null`() {
+        val (start, end) = KeySerializer.scanBounds(KeyRange(5, true, null, false), DataType.INT32)
+        start shouldBe key(5)
+        end shouldBe null
+    }
+
+    @Test
+    fun `scanBounds - 제외 하한은 successor부터`() {
+        val (start, _) = KeySerializer.scanBounds(KeyRange(5, false, null, false), DataType.INT32)
+        start shouldBe succ(5)
+    }
+
+    @Test
+    fun `scanBounds - 하한 없음은 빈 배열부터, 제외 상한은 값 미만`() {
+        val (start, end) = KeySerializer.scanBounds(KeyRange(null, false, 9, false), DataType.INT32)
+        start shouldBe ByteArray(0)
+        end shouldBe key(9)
+    }
+
+    @Test
+    fun `scanBounds - 포함 상한은 successor 미만`() {
+        val (_, end) = KeySerializer.scanBounds(KeyRange(null, false, 9, true), DataType.INT32)
+        end shouldBe succ(9)
+    }
+
+    @Test
+    fun `scanBounds - VARCHAR 제외 하한이 접두사를 공유하는 더 긴 문자열을 포함한다`() {
+        // name > 'abc' 는 'abcd'를 포함해야 한다
+        val (start, _) = KeySerializer.scanBounds(KeyRange("abc", false, null, false), DataType.VARCHAR)
+        val abcd = KeySerializer.compositeKey(KeySerializer.serializeKey("abcd", DataType.VARCHAR), RID(0, 0))
+        compareBytes(abcd, start) shouldBeGreaterThan 0
+    }
+
+    // --- equalityScanEnd: 전부 0xFF인 키의 successor ---
+
+    @Test
+    fun `equalityScanEnd - 전부 0xFF인 키는 successor가 없어 null을 반환한다`() {
+        val int32Max = KeySerializer.serializeKey(Int.MAX_VALUE, DataType.INT32)
+        KeySerializer.equalityScanEnd(int32Max) shouldBe null
+
+        val int64Max = KeySerializer.serializeKey(Long.MAX_VALUE, DataType.INT64)
+        KeySerializer.equalityScanEnd(int64Max) shouldBe null
+    }
+
+    @Test
+    fun `scanBounds - INT32 최대값 등가는 상한 없음`() {
+        val (start, end) = KeySerializer.scanBounds(KeyRange.equal(Int.MAX_VALUE), DataType.INT32)
+        start shouldBe key(Int.MAX_VALUE)
+        end shouldBe null
     }
 }

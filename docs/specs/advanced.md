@@ -61,9 +61,75 @@
 
 ### 4. 인덱스 고도화
 
-#### 범위 스캔 (Range Scan)
-- `WHERE age > 20 AND age < 30` → B+Tree의 `scan(startKey, endKey)` 활용
-- MVP에서는 등가 조건만 인덱스 스캔 대상
+#### 범위 스캔 (Range Scan) ✅
+
+`WHERE age > 20 AND age < 30` 같은 부등식 조건을 B+Tree의 `scan(startKey, endKey)`로
+처리한다. MVP에서는 등가 조건만 인덱스 스캔 대상이었다.
+
+**PostgreSQL 방식**
+
+- 조건 매칭 (`indxpath.c`, `match_opclause_to_indexcol()`): WHERE 절이
+  `indexkey OP const` 꼴이고 OP가 인덱스 opfamily(btree는 `<`, `<=`, `=`, `>=`, `>`)에
+  속하면 인덱스 조건(indexqual)이 된다. `const OP indexkey`는 교환자(commutator)로
+  뒤집는다. 인덱스로 보내지 못한 조건은 filter(qpqual)로 남겨 힙 튜플에서 평가한다.
+- 키 전처리 (`nbtutils.c`, `_bt_preprocess_keys()`): 같은 컬럼의 여러 조건을 정리해
+  중복·모순을 제거하고, `_bt_first()`가 가장 좁은 시작 위치로 내려간 뒤 `_bt_checkkeys()`가
+  리프를 순회하며 종료 시점을 판정한다. 시작 위치는 컬럼당 하나의 3-way 비교 키
+  (insertion scankey)로 잡고, 순회 중 필터링은 원래 조건(search scankey)으로 한다.
+- 재검사 (`index-scanning.html`): 인덱스 AM이 lossy라고 알리면 executor가 힙 튜플에서
+  인덱스 조건을 다시 평가한다. 정확한 AM은 recheck 없이 결과를 그대로 쓴다.
+- 선택도 (`selfuncs.c`, `scalarineqsel()`; `clausesel.c`, `clauselist_selectivity_ext()`):
+  부등식 하나는 히스토그램으로 추정하고, 같은 컬럼의 상·하한 쌍은 `hisel + losel - 1`로
+  결합한다. 통계가 없으면 단방향 `DEFAULT_INEQ_SEL = 1/3`, 양방향
+  `DEFAULT_RANGE_INEQ_SEL = 0.005`를 쓴다.
+
+**Gwanbase 구현**
+
+| 항목 | 구현 | PostgreSQL과의 차이 | 이유 |
+|------|------|---------------------|------|
+| 조건 매칭 | `PlanEnumerator`가 WHERE의 AND 체인에서 `col OP literal`(교환 포함)을 모아 인덱스 있는 컬럼별로 하한·상한 경계를 만든다. 인덱스마다 경계를 만들어 비용을 계산하고 SeqScan을 포함해 가장 저렴한 계획을 고른다 | opfamily 대신 `BinaryOperator` 5종을 직접 매칭. OR·NOT·함수 조건은 미지원 | 연산자 클래스 체계가 없고 타입도 5개뿐이라 opfamily 추상화는 이름만 남는다. OR는 Bitmap Index Scan 항목에서 다룬다 |
+| 리터럴 판정 | `IntLiteral`, `StringLiteral`, `BoolLiteral`, `FloatLiteral`만 경계 값으로 허용. `NullLiteral`·산술식은 필터에만 남긴다 | PostgreSQL은 volatile 함수·인덱스 테이블 변수가 없는 모든 식을 const로 본다 | `Planner.evaluateLiteral()`이 리터럴만 평가할 수 있다. NULL 경계는 비교가 항상 UNKNOWN이므로 실행기가 빈 결과를 낸다 |
+| 경계 범위 검사 | INT32 컬럼의 경계 리터럴이 Int 범위를 벗어나면 그 경계를 버리고(범위 확장) 재검사에 맡긴다 (`Planner.toKeyRange`) | PostgreSQL은 바인딩 단계에서 타입을 강제해 이런 리터럴이 옵티마이저에 도달하지 않는다 | Binder가 비교 피연산자 타입을 검사하지 않는 기존 한계. 확장 방향은 재검사 덕분에 항상 정확하다 |
+| 키 전처리 | 같은 방향 경계가 둘 이상이면 **첫 번째만** 인덱스로 보내고 나머지는 필터에 맡긴다 | `_bt_preprocess_keys()`는 더 좁은 쪽을 고른다 | 리터럴 값 비교 코드를 줄이기 위한 단순화. 재검사가 정확성을 보장하므로 결과는 같고 스캔 범위만 넓어질 수 있다 |
+| 계획 노드 | `PlanNode.IndexScan`의 `lookupValue`를 `lowerBound / upperBound: Bound?` (`Expression` + `inclusive`)로 일반화. 등가는 양쪽 경계가 같은 값이고 포함 | 노드 하나로 등가·범위를 표현. 별도 RangeScan 노드 없음 | PostgreSQL도 `IndexScan` 하나에 indexqual 목록을 싣는다. 노드를 나누면 비용·EXPLAIN·Planner 변환이 두 벌이 되고 복합 인덱스 때 다시 합쳐야 한다 |
+| 바이트 경계 | `KeyRange` → `[startKey, endKey?)` 변환을 `KeySerializer`가 담당. `>= v`는 `v`, `> v`는 `successor(v)`, `< v`는 `v` 미만, `<= v`는 `successor(v)` 미만, 하한 없음은 빈 배열, 상한 없음은 `null`. `successor`는 기존 `equalityScanEnd()`. 타입 최대값처럼 successor가 없는 키(전부 0xFF)는 상한 없음(null)으로 처리한다. | insertion scankey 대신 바이트 경계 두 개. 복합 키(`컬럼값 + RID`)라 컬럼값 자체의 successor가 경계가 된다 | B+Tree가 타입을 모르고 unsigned 바이트만 비교하는 구조를 유지한다. 경계 계산을 `KeySerializer` 한 곳에 두면 `scan()`은 그대로 쓸 수 있다 |
+| B+Tree | `scan(startKey, endKey: ByteArray?)` — `null`이면 리프 체인 끝까지 | 동일 의미 | 가변 길이 키라 "가장 큰 키"를 만들 수 없어 `null`로 표현한다 |
+| 실행기 | `IndexScanOperator`가 `rangeSupplier: () -> KeyRange?`로 경계를 받는다. **재검사는 옵티마이저가 인덱스 조건을 필터에서 제거하지 않는 방식**으로 구현한다. 기존 `remainingFilter` 평가가 곧 recheck이고 `removeCondition()`은 삭제. RID는 lazy 순회한다. | PostgreSQL은 정확한 AM에서 recheck를 생략한다. Gwanbase는 항상 재검사한다 | 새 코드 없이 기존 필터 경로가 recheck 역할을 한다. 키 인코딩 정확성에 결과가 좌우되지 않아 안전하고, 비용은 튜플당 표현식 평가 한 번이다 |
+| 선택도 | `CostEstimator.rangeSelectivity(stats, lower, upper)`로 통일: 통계가 있으면 `(min(upper,max) - max(lower,min)) / (max - min)`을 [0,1]로 clamp, 없으면 단방향 1/3, 양방향 0.005 | 히스토그램 없이 min/max 균등 분포 가정. 정수 컬럼만 통계 사용, VARCHAR는 기본값 | 히스토그램은 CBO 항목(3번)에서 도입한다. 기본값은 PostgreSQL 상수를 그대로 써서 이후 비교가 쉽도록 한다 |
+| EXPLAIN | 등가면 `key=v`, 범위면 `range=[v1, v2)` 형식. 필터(인덱스 조건 포함)를 `filter=`로 함께 출력한다 | PostgreSQL은 `Index Cond`와 `Filter`를 분리 표시 | 재검사 방식상 필터에 인덱스 조건이 남는 것이 실제 동작이다. 표시만 분리하면 동작과 어긋난다 |
+
+**선행 버그 수정: VARCHAR 인덱스 키 접두사 문제**
+
+`KeySerializer`가 VARCHAR를 길이 정보 없이 UTF-8 바이트 그대로 직렬화하고 뒤에 RID를
+붙이므로 `'abc' + RID`와 `'abcd' + RID`의 바이트 순서가 문자열 순서와 일치하지 않는다.
+등가 스캔 `[abc, abd)`에 `'abcd'`가 포함되어 `WHERE name = 'abc'`가 `'abcd'` 행을 반환하고
+(IndexScan이 선택되는 600행 이상에서 재현), 같은 경로를 쓰는 UNIQUE 검사는 `'abc'`가
+있을 때 `'abcd'` 삽입을 23505로 잘못 거부한다. 범위 스캔에서는 `name > 'abc'`가
+`'abcd'`를 누락하는 정확성 문제가 된다.
+
+수정: VARCHAR 키 뒤에 종단 바이트 `0x00`을 붙인다. UTF-8에는 NUL 문자 외에 `0x00`이
+없으므로 `'abc\0' < 'abcd\0'`이고 `successor('abc\0') = 'abc\1' < 'abcd\0'`이 보장된다.
+NUL을 포함한 문자열은 `require`로 거부한다(PostgreSQL도 text에 NUL을 허용하지 않는다).
+온디스크 인덱스 포맷이 바뀌므로 기존 DB 파일은 인덱스를 재생성해야 한다.
+
+**범위 밖 (이후 항목)**
+
+- `BETWEEN` 문법 (파서 desugar만 필요)
+- 인덱스 순서를 ORDER BY에 활용 (Sort 제거)
+- Index Nested Loop Join의 동적 범위 키
+- VARCHAR 컬럼 min/max 통계
+
+**참고 자료**
+
+- [PostgreSQL 문서: Index Types](https://www.postgresql.org/docs/current/indexes-types.html) — B-tree가 처리하는 연산자 `<`, `<=`, `=`, `>=`, `>`, `BETWEEN`
+- [PostgreSQL 문서: Index Scanning](https://www.postgresql.org/docs/current/index-scanning.html) — lossy 인덱스와 recheck
+- [`src/backend/optimizer/path/indxpath.c`](https://github.com/postgres/postgres/blob/master/src/backend/optimizer/path/indxpath.c) — `match_clause_to_indexcol()`, `match_opclause_to_indexcol()`, indexqual vs qpqual
+- [`src/backend/access/nbtree/README`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/README) — search scankey / insertion scankey, `_bt_first()`, `_bt_checkkeys()`
+- [`src/backend/access/nbtree/nbtutils.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtutils.c) — `_bt_preprocess_keys()`
+- [`src/backend/access/nbtree/nbtsearch.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtsearch.c) — `_bt_first()`
+- [`src/backend/utils/adt/selfuncs.c`](https://github.com/postgres/postgres/blob/master/src/backend/utils/adt/selfuncs.c) — `scalarineqsel()`, `ineq_histogram_selectivity()`
+- [`src/include/utils/selfuncs.h`](https://github.com/postgres/postgres/blob/master/src/include/utils/selfuncs.h) — `DEFAULT_INEQ_SEL`, `DEFAULT_RANGE_INEQ_SEL`
+- [`src/backend/optimizer/path/clausesel.c`](https://github.com/postgres/postgres/blob/master/src/backend/optimizer/path/clausesel.c) — `clauselist_selectivity_ext()`, `addRangeClause()`, `hisel + losel - 1`
 
 #### 복합 인덱스 (Composite Index)
 - `CREATE INDEX idx ON t (col1, col2)` — 다중 컬럼 키 직렬화
@@ -391,7 +457,7 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 
 | 순위 | 항목 | 이유 |
 |------|------|------|
-| 1 | 범위 스캔 | 등가 조건만으로는 인덱스 활용이 제한적 |
+| 1 | 범위 스캔 ✅ | 등가 조건만으로는 인덱스 활용이 제한적 |
 | 2 | Hash Join | 대량 등가 조인 성능 대폭 향상 |
 | 3 | GROUP BY / 집계 | 실용적 쿼리 지원에 필수 |
 | 4 | CBO (히스토그램) | 데이터 분포 반영으로 계획 품질 향상 |

@@ -87,6 +87,27 @@ class SqlExecutorTest {
     }
 
     @Test
+    fun `UNIQUE VARCHAR 컬럼에 접두사를 공유하는 다른 값은 삽입된다`() {
+        executor.execute("CREATE TABLE tags (name VARCHAR(50) UNIQUE)")
+        executor.execute("INSERT INTO tags (name) VALUES ('abcd')")
+        // 'abcd'가 먼저 있어도 'abc'는 다른 값이므로 23505가 아니어야 한다.
+        // 'abc' 삽입 시 등가 검사가 [abc, successor(abc)) 구간을 스캔하는데,
+        // 종단 바이트가 없으면 이 구간에 'abcd'+RID가 잘못 포함되어 false positive가 난다.
+        executor.execute("INSERT INTO tags (name) VALUES ('abc')")
+        val result = executor.execute("SELECT name FROM tags") as ExecuteResult.Selected
+        result.rows.size shouldBe 2
+    }
+
+    @Test
+    fun `PRIMARY KEY가 Int 최대값일 때도 중복 삽입을 거부한다`() {
+        executor.execute("CREATE TABLE t (id INT PRIMARY KEY)")
+        executor.execute("INSERT INTO t (id) VALUES (2147483647)")
+        assertThrows<UniqueViolationException> {
+            executor.execute("INSERT INTO t (id) VALUES (2147483647)")
+        }
+    }
+
+    @Test
     fun `DROP TABLE 후 같은 이름의 PRIMARY KEY 테이블을 다시 만들 수 있다`() {
         executor.execute("CREATE TABLE users (id INT PRIMARY KEY)")
         executor.execute("DROP TABLE users")
