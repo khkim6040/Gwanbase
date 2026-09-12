@@ -26,11 +26,15 @@ Gwanbase 엔진을 실제로 띄워 방문자가 브라우저에서 SQL을 실�
 ```
 playground/
 ├── build.gradle.kts          kotlin jvm + application 플러그인, implementation(project(":core"))
-├── Dockerfile                multi-stage: gradle installDist → eclipse-temurin:17-jre
-├── fly.toml                  internal_port 8080, 볼륨 없음(재시작 시 초기화 = 의도)
 └── src/
+(저장소 루트)
+├── Dockerfile                multi-stage: ./gradlew :playground:installDist → eclipse-temurin:17-jre.
+│                             빌드 컨텍스트에 core가 필요해 루트에 둔다
+├── fly.toml                  internal_port 8080, 볼륨 없음(재시작 시 초기화 = 의도)
+
     ├── main/kotlin/gwanbase/playground/
-    │   ├── Main.kt           Database.open + SampleData 적재 + PlaygroundServer.start
+    │   ├── Main.kt           환경변수(PORT, GWANBASE_DB) 읽고 Engine + PlaygroundServer 기동
+    │   ├── Engine.kt         Database 보유·초기화(reset): 파일 삭제 → open → SampleData 적재
     │   ├── PlaygroundServer.kt   HttpServer, 라우팅 4개, reset용 RW 락
     │   ├── SessionRegistry.kt    쿠키 → DatabaseSession, idle TTL, 세션별 synchronized
     │   ├── Json.kt           ExecuteResult / 스키마 → JSON 문자열 (escape 포함)
@@ -47,7 +51,7 @@ playground/
 | 메서드·경로 | 요청 | 응답 |
 |---|---|---|
 | `GET /` | — | `index.html` |
-| `POST /query` | `{"sql": "..."}` | 성공: `{"kind", "columns", "rows", "count", "message", "truncated", "txn"}` / 실패: `{"error", "sqlState", "txn"}` |
+| `POST /query` | 본문 = SQL 텍스트 그대로 (`text/plain`) | 성공: `{"kind", "columns", "rows", "count", "message", "truncated", "txn"}` / 실패: `{"error", "sqlState", "txn"}` |
 | `GET /schema` | — | `{"tables": [{"name", "columns": [{"name","type","nullable"}], "indexes": [{"name","column","unique"}]}]}` |
 | `POST /reset` | — | `{"ok": true}` |
 
@@ -59,7 +63,8 @@ playground/
 - `/schema`는 `Catalog.listTables()`와 `getIndexesForTable()`로 만든다.
 - `/reset`은 모든 세션을 close → `Database.close()` → DB 파일 삭제 → 재오픈 →
   `SampleData` 적재 순서로 수행한다.
-- 잘못된 경로는 404, 잘못된 메서드는 405, 본문 64KB 초과는 413.
+- SQL 실행 실패는 400, 잘못된 경로는 404, 잘못된 메서드는 405, 본문 64KB 초과는 413.
+- 요청 본문을 SQL 텍스트 그대로 받으므로 JSON 파서가 필요 없다. 인코더만 손으로 쓴다.
 
 ## 세션과 동시성
 
@@ -111,7 +116,7 @@ playground/
 호출한다. JSON 파서 의존성을 추가하지 않고 응답 문자열 포함 여부로 검증한다.
 
 1. `SELECT`가 `columns`와 `rows`를 담아 반환한다.
-2. 존재하지 않는 테이블 조회는 `sqlState` 42P01을 반환한다.
+2. 존재하지 않는 테이블 조회는 `sqlState` 42000(`BindException` 매핑)을 반환한다.
 3. 쿠키 A에서 `BEGIN` + `INSERT` 후 쿠키 B에서 같은 행 `UPDATE` → 55P03.
 4. `/reset` 후 `/schema`가 샘플 스키마로 돌아온다.
 5. 500행을 넘는 `SELECT`는 `truncated: true`다.
