@@ -1,5 +1,6 @@
 package gwanbase.table
 
+import gwanbase.index.KeySerializer
 import gwanbase.storage.DiskManager
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.nulls.shouldBeNull
@@ -239,6 +240,28 @@ class DatabaseTest {
             val idTree = db.getIndexTree(db.getCatalog().getIndex("idx_id")!!)
             val key = gwanbase.index.KeySerializer.serializeKey(2, DataType.INT32)
             idTree.scan(key, gwanbase.index.KeySerializer.equalityScanEnd(key)).hasNext() shouldBe false
+        }
+    }
+
+    @Test
+    fun `인덱스 생성 후 삽입으로 루트 split이 일어나도 인덱스 조회가 정확하다`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.createIndex("idx_id", "users", "id")
+            val indexInfo = db.getCatalog().getIndexesForTable("users").single()
+
+            // 한 리프(4KB)를 넘도록 충분히 삽입해 루트 split을 유발한다
+            val ids = (1..2000).shuffled(java.util.Random(1))
+            for (id in ids) {
+                db.insertTuple("users", Tuple(emailSchema, arrayOf(id, "u$id@x.com")))
+            }
+
+            val tree = db.getIndexTree(indexInfo)
+            for (id in 1..2000) {
+                val key = KeySerializer.serializeKey(id, DataType.INT32)
+                val hits = tree.scan(key, KeySerializer.equalityScanEnd(key)).asSequence().count()
+                hits shouldBe 1
+            }
         }
     }
 

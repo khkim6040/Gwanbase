@@ -19,9 +19,8 @@ class BPlusTree internal constructor(
     initialRootPageId: Int,
 ) {
 
-    /** 현재 루트 페이지 ID. 루트 split 발생 시 갱신된다. */
-    var rootPageId: Int = initialRootPageId
-        private set
+    /** 루트 페이지 ID. 루트 split 시에도 바뀌지 않는다 ([createNewRoot] 참조). */
+    val rootPageId: Int = initialRootPageId
 
     /**
      * 주어진 [key]에 해당하는 값을 반환한다.
@@ -318,25 +317,43 @@ class BPlusTree internal constructor(
     }
 
     /**
-     * 루트 split 결과로 새 내부 노드 루트를 생성한다.
-     * leftmostChild에 기존 왼쪽 자식, slot[0]에 (promoteKey, 오른쪽 자식)을 넣는다.
+     * 루트 split 결과를 반영하되 루트 페이지 ID는 그대로 유지한다.
+     *
+     * 기존 루트 페이지의 내용을 새 페이지로 옮겨 왼쪽 자식으로 삼고, 루트 페이지는
+     * (leftmostChild=옮긴 페이지, slot[0]=(promoteKey, 오른쪽 자식))인 내부 노드로
+     * 다시 초기화한다. 루트 ID가 바뀌지 않으므로 Catalog/KVStore 메타데이터가 기억한
+     * rootPageId가 split 이후에도 유효하다.
+     *
+     * SQLite의 `balance_deeper()`와 같은 방식이다. 루트 페이지 번호가 테이블의 영구
+     * 식별자(sqlite_schema.rootpage)라서 루트를 옮길 수 없기 때문이다.
+     * PostgreSQL은 반대로 루트를 새 페이지로 옮기고 메타페이지(`BTMetaPageData.btm_root`)를
+     * 갱신하는데, 인덱스마다 메타페이지가 있어 갱신 비용이 페이지 하나 쓰기로 끝난다.
+     * Gwanbase는 인덱스 루트가 단일 Catalog 페이지에 모여 있어 SQLite 방식이 더 싸다.
+     * - https://github.com/sqlite/sqlite/blob/master/src/btree.c (`balance_deeper`)
+     * - https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtinsert.c (`_bt_newlevel`)
      */
     private fun createNewRoot(leftChildId: Int, promoteKey: ByteArray, rightChildId: Int) {
-        val newRootPage = bpm.newPage() ?: error("신규 루트 페이지 할당 실패")
-        val newRootPageId = newRootPage.pageId
+        check(leftChildId == rootPageId) { "루트 split의 왼쪽 자식은 루트 자신이어야 한다: $leftChildId != $rootPageId" }
+        val movedPage = bpm.newPage() ?: error("루트 이동용 페이지 할당 실패")
+        val movedPageId = movedPage.pageId
+        val rootPage = bpm.fetchPage(rootPageId) ?: error("root not found: $rootPageId")
         try {
-            val newRoot = BPlusTreeNode(newRootPage.data)
+            // 기존 루트 내용을 통째로 새 페이지에 복사 (position/limit은 duplicate로 격리)
+            val src = rootPage.data.duplicate().clear()
+            movedPage.data.duplicate().clear().put(src)
+
+            val newRoot = BPlusTreeNode(rootPage.data)
             newRoot.initInternal(
                 parentPageId = BPlusTreeNode.INVALID_PAGE_ID,
-                leftmostChildPageId = leftChildId,
+                leftmostChildPageId = movedPageId,
             )
             check(newRoot.insertInternalEntry(promoteKey, rightChildId)) {
                 "새 루트 노드에 초기 엔트리 삽입 실패"
             }
         } finally {
-            bpm.unpinPage(newRootPageId, isDirty = true)
+            bpm.unpinPage(rootPageId, isDirty = true)
+            bpm.unpinPage(movedPageId, isDirty = true)
         }
-        rootPageId = newRootPageId
     }
 
     /** unsigned lexicographic byte 비교 */
