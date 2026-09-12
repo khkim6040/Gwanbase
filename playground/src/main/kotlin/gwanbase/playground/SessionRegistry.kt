@@ -28,7 +28,7 @@ class PlaygroundSession(private val session: DatabaseSession) : AutoCloseable {
 
     /** PG 프로토콜 ReadyForQuery 상태와 같은 의미: I(idle) / T(트랜잭션 중) / E(실패한 트랜잭션). */
     val txnStatus: Char
-        get() = when {
+        @Synchronized get() = when {
             txnFailed -> 'E'
             inTransaction -> 'T'
             else -> 'I'
@@ -46,7 +46,11 @@ class PlaygroundSession(private val session: DatabaseSession) : AutoCloseable {
             // ponytail: 실행 단계 오류(UNIQUE 위반 등)는 DatabaseSession이 이미 abort해 활성 트랜잭션이
             // 없고, 이때 ROLLBACK은 IllegalStateException을 던진다. 바인딩 오류는 abort되지 않아
             // ROLLBACK이 정상 동작한다. 두 경우 모두 방문자에게는 ROLLBACK 성공으로 보여야 한다.
-            runCatching { session.executeSql(sql) }
+            try {
+                session.executeSql(sql)
+            } catch (e: IllegalStateException) {
+                // 활성 트랜잭션이 이미 abort된 경우 — 위 주석 참조
+            }
             inTransaction = false
             txnFailed = false
             return ExecuteResult.TransactionRolledBack
@@ -68,6 +72,7 @@ class PlaygroundSession(private val session: DatabaseSession) : AutoCloseable {
     private fun isRollback(sql: String): Boolean =
         sql.trim().removeSuffix(";").trim().equals("ROLLBACK", ignoreCase = true)
 
+    /** 세션을 닫는다. 미커밋 트랜잭션은 abort되고 잠금이 풀린다. */
     @Synchronized
     override fun close() = session.close()
 }
