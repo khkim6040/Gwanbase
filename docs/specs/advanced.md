@@ -372,7 +372,7 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 | 검사 시점 | **힙 변경 전** `Database.checkUniqueConstraints()` | **의도적 차이.** MVCC/VACUUM이 없어 실패한 힙 튜플을 dead 버전으로 남길 수 없다. 검사를 선행하면 힙·다른 인덱스에 반쯤 쓰인 상태가 남지 않아 undo도 불필요 |
 | 검사 방법 | `tree.scan(columnKey, equalityScanEnd)`로 접두사 범위 조회, UPDATE는 자기 RID 제외 | 기존 복합 키(`columnKey + rid`) 구조를 그대로 사용 |
 | 동시 삽입 | `DatabaseSession.waitForConflictingRow()` — 충돌 RID에 **S 잠금 획득으로 상대 트랜잭션 종료를 대기** 후 1회 재시도 | xid 대기 대신 행 잠금 대기. Strict 2PL에서는 잠금이 트랜잭션 종료까지 유지되므로 등가. 데드락은 기존 감지기가 40P01로 처리 |
-| 검사–삽입 원자성 | 보장하지 않음 (`Database.findRidByColumnKey` 주석 참조) | B+Tree 자체가 아직 동시 쓰기에 안전하지 않은 기존 한계. B+Tree 래치 도입 시 함께 해결 |
+| 검사–삽입 원자성 | 보장하지 않음 (`Database.findRidByColumnKey` 주석 참조) | B+Tree 래치(26번)는 트리 구조만 보호한다. 힙 삽입까지 묶는 원자성은 별도 항목 |
 | NULL | 검사 제외 (`NULLS DISTINCT`) | 동일 |
 | 에러 | `UniqueViolationException(indexName, conflictingRid)` → 23505, 메시지 `duplicate key value violates unique constraint "..."` | 동일. 예외가 `table` 패키지에 있는 이유는 모듈 의존 방향(`sql → table`) 때문 |
 | `CREATE UNIQUE INDEX` 빌드 | 스캔하며 트리 조회로 검사, 위반 시 Catalog 미등록 | 정렬 기반 인접 검사 대신 단순화. 결과 동일 |
@@ -552,6 +552,41 @@ UPDATE/DELETE 스캔은 잠금 없이 수행되고 변경 시점에 X 잠금을 
 - [`src/backend/executor/nodeModifyTable.c`](https://github.com/postgres/postgres/blob/master/src/backend/executor/nodeModifyTable.c) — `ExecUpdate()`/`ExecDelete()`의 `TM_Updated` 분기에서 `EvalPlanQual` 호출
 - [`src/backend/access/heap/heapam.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/heap/heapam.c) — `heap_update()`/`heap_delete()`의 `TM_Updated` 반환
 
+### 26. B+Tree 쓰기 동기화 ✅
+
+`BPlusTree`는 Phase 1의 단일 스레드 가정 그대로였다. Phase 6에서 세션이 스레드별로
+분리되자 두 세션이 같은 인덱스에 동시에 INSERT하면 split 도중 페이지가 겹쳐 쓰여
+`IndexOutOfBoundsException`이 나거나 키가 사라졌다. `BufferPoolManager`는
+`@Synchronized`지만 `Page.data` 수정은 그 밖에서 일어나므로 보호되지 않는다.
+
+**PostgreSQL 방식**
+
+- Lehman & Yao B-link tree. 페이지마다 버퍼 락(read/write)을 잡고, split 중인
+  페이지를 만나면 right-link를 따라 이동해 루트에서 다시 내려오지 않는다.
+- 하강 시 부모 락을 잡은 채 자식 락을 잡는 latch coupling으로 루트 병목을 피하고,
+  `_bt_getroot()`는 메타페이지 캐시로 루트 락 경합을 줄인다.
+- 인덱스 자체(relation)에는 `AccessShareLock`/`RowExclusiveLock` 등 relation-level 락이
+  별도로 있어 DDL과 DML의 충돌은 그쪽이 막는다.
+
+**Gwanbase 구현**
+
+| 항목 | 구현 | PostgreSQL과의 차이 | 이유 |
+|------|------|---------------------|------|
+| 락 단위 | 트리 하나에 `ReentrantReadWriteLock` 하나. `insert`/`delete`는 write, `search`/`scan`은 read | 페이지 단위 락 + right-link 대신 트리 단위 | 정확성 우선. 인덱스당 쓰기가 직렬화되지만 행 잠금(Strict 2PL)이 이미 같은 행의 동시 수정을 막고 있어 실효 병렬도 손실은 작다. latch crabbing은 후속 항목 |
+| 래치 식별 | `Database.indexLatches: ConcurrentHashMap<rootPageId, RWLock>`. `getIndexTree()`가 같은 루트면 같은 래치를 넘긴다 | PG는 relation OID로 락을 식별 | `BPlusTree` 인스턴스가 호출마다 새로 만들어지는 기존 구조를 유지하면서 래치만 공유 |
+| scan | 리프 한 장을 read 래치 안에서 복사한 뒤 래치를 놓고 yield. 다음 리프는 `nextLeafPageId`로 다시 잡는다 | PG도 페이지 단위로 락을 잡았다 놓는다 | scan 전체에 래치를 걸면 `IndexScanOperator.next()`가 행 잠금을 기다리는 동안 래치를 쥐어, 쓰기 세션과 `LockManager` 감지 밖의 데드락이 생긴다. 리프 페이지는 merge·해제되지 않아 놓았다 다시 잡아도 포인터가 유효하다 |
+| phantom | 래치를 놓은 사이 끼어든 삽입은 scan에 빠질 수 있다 | PG는 격리 수준에 따라 다름 | predicate lock이 없는 현재 Strict 2PL의 격리 수준과 같다. 23번(Serialization Failure)에서 다룬다 |
+| 검사–삽입 원자성 | 여전히 보장하지 않음 (`Database.findRidByColumnKey` 주석) | PG는 `_bt_check_unique`가 인덱스 락 안에서 검사+삽입 | 힙 삽입까지 한 래치로 묶어야 해 인덱스당 INSERT 처리량이 1로 떨어진다. `waitForConflictingRow`가 커밋 후 충돌을 흡수하므로 별도 항목으로 미룬다 |
+| HeapFile | 미해결 | — | 같은 성격의 문제지만 힙은 페이지 단위 락이 자연스러워 별도 항목으로 둔다 |
+
+**참고 자료**
+
+- [`src/backend/access/nbtree/README`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/README) — "Lehman and Yao Algorithm and Insertions", "Page Locking", right-link와 latch coupling
+- [`src/backend/access/nbtree/nbtsearch.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtsearch.c) — `_bt_search()`, `_bt_moveright()`
+- [`src/backend/access/nbtree/nbtinsert.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtinsert.c) — `_bt_doinsert()`, `_bt_split()`
+- [PostgreSQL 문서: 13.3.1 Table-Level Locks](https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-TABLES) — relation-level 락 모드
+- Lehman, P. L., Yao, S. B. (1981). *Efficient Locking for Concurrent Operations on B-Trees*. ACM TODS 6(4)
+
 ---
 
 ## 우선순위 가이드
@@ -604,7 +639,7 @@ UPDATE/DELETE 스캔은 잠금 없이 수행되고 변경 시점에 X 잠금을 
 | 1 | 세션 실패 상태 ✅ (22번) | 오류 후 ROLLBACK 계약 |
 | 2 | 영향 행 수 ✅ (24번) | command tag 정확성, 낮은 비용 |
 | 3 | UPDATE/DELETE predicate recheck ✅ (25번) | 잠금 후 바뀐 행에 WHERE 재평가 (PG EvalPlanQual) |
-| 4 | B+Tree 쓰기 동기화 | 트리 단위 RW 락부터, latch crabbing은 이후 |
+| 4 | B+Tree 쓰기 동기화 ✅ (26번) | 트리 단위 RW 락. latch crabbing은 이후 |
 
 ## 참고 자료
 
