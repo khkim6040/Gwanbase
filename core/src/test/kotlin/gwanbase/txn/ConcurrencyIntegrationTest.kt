@@ -355,4 +355,47 @@ class ConcurrencyIntegrationTest {
         runParentDeleteAgainstUncommittedChild("ROLLBACK") shouldBe null
         (db.executeSql("SELECT * FROM users") as ExecuteResult.Selected).rows.size shouldBe 0
     }
+
+    // ── affected-row count ──
+
+    /**
+     * s1이 id=1 행의 X 잠금을 쥔 채로 그 행을 삭제·커밋하는 동안,
+     * s2가 같은 행을 대상으로 [sql]을 실행한 결과를 반환한다.
+     * s2는 잠금 없이 스캔한 stale RID로 잠금 대기에 들어가고, 깨어났을 때 행은 이미 없다.
+     */
+    private fun runAgainstRowDeletedWhileWaiting(sql: String): ExecuteResult {
+        val s1Locked = CountDownLatch(1)
+        val s2Started = CountDownLatch(1)
+        val s2Result = AtomicReference<ExecuteResult?>(null)
+
+        val t1 = Thread {
+            db.createSession().use { s1 ->
+                s1.executeSql("BEGIN")
+                s1.executeSql("UPDATE t SET val = val WHERE id = 1") // X(rid1) 획득
+                s1Locked.countDown()
+                s2Started.await()
+                Thread.sleep(100) // s2가 대기 큐에 들어갈 시간
+                s1.executeSql("DELETE FROM t WHERE id = 1")
+                s1.executeSql("COMMIT")
+            }
+        }
+        val t2 = Thread {
+            s1Locked.await()
+            s2Started.countDown()
+            s2Result.set(db.executeSql(sql))
+        }
+        t1.start(); t2.start()
+        t1.join(5000); t2.join(5000)
+        return s2Result.get()!!
+    }
+
+    @Test
+    fun `잠금 대기 중 삭제된 행은 DELETE 영향 행 수에 포함되지 않는다`() {
+        runAgainstRowDeletedWhileWaiting("DELETE FROM t WHERE id = 1") shouldBe ExecuteResult.Deleted(0)
+    }
+
+    @Test
+    fun `잠금 대기 중 삭제된 행은 UPDATE 영향 행 수에 포함되지 않는다`() {
+        runAgainstRowDeletedWhileWaiting("UPDATE t SET val = 5 WHERE id = 1") shouldBe ExecuteResult.Updated(0)
+    }
 }
