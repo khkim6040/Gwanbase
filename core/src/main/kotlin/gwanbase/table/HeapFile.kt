@@ -3,6 +3,9 @@ package gwanbase.table
 import gwanbase.storage.BufferPoolManager
 import gwanbase.storage.DiskManager
 import java.nio.ByteOrder
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 /**
  * 순서 없는 튜플 저장소 (Heap File).
@@ -20,10 +23,25 @@ import java.nio.ByteOrder
  *
  * 데이터 페이지 ID 배열을 헤더에 직접 저장하므로 페이지가 비연속
  * 할당되어도 scan이 정확하다. 최대 약 1022개 데이터 페이지를 지원한다.
+ *
+ * 동시성: 파일(테이블) 단위 RW 래치 하나로 헤더(free-list 헤드, 데이터 페이지
+ * 배열)와 데이터 페이지 슬롯 디렉터리 변경을 직렬화한다. PostgreSQL은 페이지
+ * 단위 buffer content lock + FSM + relation extension lock을 조합하고, 잠근 뒤
+ * 여유 공간을 재확인해 부족하면 다른 페이지로 넘어간다
+ * (https://github.com/postgres/postgres/blob/master/src/backend/access/heap/hio.c
+ * `RelationGetBufferForTuple`). Gwanbase는 insert(헤더→데이터 페이지)와
+ * delete(데이터 페이지→헤더)의 잠금 순서가 반대라 페이지 단위로 가면 같은
+ * "해제 후 재확인" 루프가 필요하므로, 정확성 우선으로 파일 단위에서 시작한다.
+ * (ponytail: 파일 단위 RW 락, 삽입 경합이 문제가 되면 페이지 단위 락 + FSM으로 교체)
+ *
+ * 같은 파일을 가리키는 인스턴스는 반드시 같은 [latch]를 공유해야 한다.
+ *
+ * @param latch 파일 단위 RW 래치. 같은 헤더 페이지를 가리키는 인스턴스끼리 공유한다
  */
 class HeapFile(
     private val bpm: BufferPoolManager,
     val firstPageId: Int,
+    private val latch: ReentrantReadWriteLock = ReentrantReadWriteLock(),
 ) {
 
     companion object {
@@ -52,7 +70,7 @@ class HeapFile(
     }
 
     /** 튜플을 삽입하고 RID를 반환한다. */
-    fun insertTuple(data: ByteArray): RID {
+    fun insertTuple(data: ByteArray): RID = latch.write {
         // Free List에서 공간 있는 페이지 찾기
         var freePageId = readFirstFreePageId()
 
@@ -68,7 +86,7 @@ class HeapFile(
                         writeFirstFreePageId(heapPage.nextFreePageId)
                         heapPage.nextFreePageId = HeapPage.NOT_IN_FREE_LIST
                     }
-                    return RID(freePageId, slotId)
+                    return@write RID(freePageId, slotId)
                 }
                 // 이 페이지는 가득 참 → 다음으로
                 val nextFree = heapPage.nextFreePageId
@@ -82,23 +100,23 @@ class HeapFile(
         }
 
         // Free List가 비었으면 새 페이지 할당
-        return allocateAndInsert(data)
+        allocateAndInsert(data)
     }
 
     /** RID로 튜플을 조회한다. */
-    fun getTuple(rid: RID): ByteArray? {
-        val page = bpm.fetchPage(rid.pageId) ?: return null
+    fun getTuple(rid: RID): ByteArray? = latch.read {
+        val page = bpm.fetchPage(rid.pageId) ?: return@read null
         try {
             val heapPage = HeapPage(page.data)
-            return heapPage.getRecord(rid.slotId)
+            heapPage.getRecord(rid.slotId)
         } finally {
             bpm.unpinPage(rid.pageId, isDirty = false)
         }
     }
 
     /** RID의 튜플을 삭제한다. */
-    fun deleteTuple(rid: RID): Boolean {
-        val page = bpm.fetchPage(rid.pageId) ?: return false
+    fun deleteTuple(rid: RID): Boolean = latch.write {
+        val page = bpm.fetchPage(rid.pageId) ?: return@write false
         try {
             val heapPage = HeapPage(page.data)
             val deleted = heapPage.deleteRecord(rid.slotId)
@@ -106,7 +124,7 @@ class HeapFile(
                 page.isDirty = true
                 addToFreeListIfNeeded(rid.pageId, heapPage)
             }
-            return deleted
+            deleted
         } finally {
             bpm.unpinPage(rid.pageId, isDirty = page.isDirty)
         }
@@ -116,26 +134,28 @@ class HeapFile(
      * 튜플을 갱신한다. 같은 슬롯에 들어가면 제자리 갱신, 아니면 delete + insert.
      * @return 갱신된 튜플의 RID
      */
-    fun updateTuple(rid: RID, data: ByteArray): RID {
+    fun updateTuple(rid: RID, data: ByteArray): RID = latch.write {
         val page = bpm.fetchPage(rid.pageId) ?: error("페이지 ${rid.pageId} 조회 실패")
-        // 쓰기 래치로 delete+reinsert를 원자적으로 수행하여 슬롯 경쟁을 방지한다.
-        val newSlotId = page.writeLatch {
+        val newSlotId = try {
             val heapPage = HeapPage(page.data)
             heapPage.deleteRecord(rid.slotId)
             page.isDirty = true
             val slotId = heapPage.insertRecord(data)
             if (slotId < 0) addToFreeListIfNeeded(rid.pageId, heapPage)
             slotId
+        } finally {
+            bpm.unpinPage(rid.pageId, isDirty = page.isDirty)
         }
-        bpm.unpinPage(rid.pageId, isDirty = page.isDirty)
-        return if (newSlotId >= 0) {
-            RID(rid.pageId, newSlotId)
-        } else {
-            insertTuple(data)
-        }
+        if (newSlotId >= 0) RID(rid.pageId, newSlotId) else insertTuple(data)
     }
 
-    /** 전체 튜플을 순회하는 iterator를 반환한다. */
+    /**
+     * 전체 튜플을 순회하는 iterator를 반환한다.
+     *
+     * 헤더의 페이지 ID 배열 읽기와 데이터 페이지 한 장 복사를 각각 read 래치 안에서
+     * 수행하고 놓는다. 래치를 쥔 채 행 잠금을 기다리면 쓰기 세션과 교착될 수 있기 때문이다
+     * ([gwanbase.index.BPlusTree.scan]과 같은 방식).
+     */
     fun scan(): Iterator<Pair<RID, ByteArray>> = HeapFileIterator()
 
     // --- Header 접근 ---
@@ -220,7 +240,7 @@ class HeapFile(
     }
 
     private inner class HeapFileIterator : Iterator<Pair<RID, ByteArray>> {
-        private val dataPageIds = readDataPageIds()
+        private val dataPageIds = latch.read { readDataPageIds() }
         private var pageIndex = 0
         private var currentRecords: List<Pair<Int, ByteArray>> = emptyList()
         private var recordIndex = 0
@@ -247,18 +267,19 @@ class HeapFile(
             while (pageIndex < dataPageIds.size) {
                 val pageId = dataPageIds[pageIndex]
                 pageIndex++
-                val page = bpm.fetchPage(pageId) ?: continue
-                try {
-                    val heapPage = HeapPage(page.data)
-                    val records = heapPage.allRecords()
-                    if (records.isNotEmpty()) {
-                        currentRecords = records
-                        recordIndex = 0
-                        currentDataPageId = pageId
-                        return
+                val records = latch.read {
+                    val page = bpm.fetchPage(pageId) ?: return@read emptyList()
+                    try {
+                        HeapPage(page.data).allRecords()
+                    } finally {
+                        bpm.unpinPage(pageId, isDirty = false)
                     }
-                } finally {
-                    bpm.unpinPage(pageId, isDirty = false)
+                }
+                if (records.isNotEmpty()) {
+                    currentRecords = records
+                    recordIndex = 0
+                    currentDataPageId = pageId
+                    return
                 }
             }
             currentRecords = emptyList()
