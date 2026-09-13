@@ -1,6 +1,9 @@
 package gwanbase.txn
 
+import gwanbase.sql.BindException
 import gwanbase.sql.ExecuteResult
+import gwanbase.sql.ParseException
+import gwanbase.table.UniqueViolationException
 import gwanbase.table.Database
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
@@ -162,6 +165,102 @@ class DatabaseSessionTest {
                     s2.executeSql("UPDATE t SET name = 'c' WHERE id = 1")
                 }
             }
+        }
+    }
+}
+
+class DatabaseSessionFailedStateTest {
+
+    @TempDir
+    lateinit var tempDir: Path
+    private lateinit var db: Database
+
+    @BeforeEach
+    fun setUp() {
+        db = Database.open(tempDir.resolve("test.db"))
+        db.executeSql("CREATE TABLE t (id INT PRIMARY KEY)")
+        db.executeSql("INSERT INTO t (id) VALUES (1)")
+    }
+
+    @AfterEach
+    fun tearDown() {
+        db.close()
+    }
+
+    @Test
+    fun `트랜잭션 중 실행 오류가 나면 E 상태가 되고 ROLLBACK으로 I로 돌아온다`() {
+        db.createSession().use { session ->
+            session.txnStatus shouldBe 'I'
+            session.executeSql("BEGIN")
+            session.txnStatus shouldBe 'T'
+            shouldThrow<UniqueViolationException> { session.executeSql("INSERT INTO t (id) VALUES (1)") }
+            session.txnStatus shouldBe 'E'
+            session.executeSql("ROLLBACK").shouldBeInstanceOf<ExecuteResult.TransactionRolledBack>()
+            session.txnStatus shouldBe 'I'
+            (session.executeSql("SELECT * FROM t") as ExecuteResult.Selected).rows.size shouldBe 1
+        }
+    }
+
+    @Test
+    fun `E 상태에서 ROLLBACK 이외의 문장은 TransactionAbortedException`() {
+        db.createSession().use { session ->
+            session.executeSql("BEGIN")
+            shouldThrow<UniqueViolationException> { session.executeSql("INSERT INTO t (id) VALUES (1)") }
+            shouldThrow<TransactionAbortedException> { session.executeSql("SELECT * FROM t") }
+            shouldThrow<TransactionAbortedException> { session.executeSql("BEGIN") }
+            session.txnStatus shouldBe 'E'
+            session.executeSql("ROLLBACK")
+        }
+    }
+
+    @Test
+    fun `E 상태에서 COMMIT은 오류 없이 ROLLBACK으로 처리된다`() {
+        db.createSession().use { session ->
+            session.executeSql("BEGIN")
+            session.executeSql("INSERT INTO t (id) VALUES (2)")
+            shouldThrow<UniqueViolationException> { session.executeSql("INSERT INTO t (id) VALUES (1)") }
+            session.executeSql("COMMIT").shouldBeInstanceOf<ExecuteResult.TransactionRolledBack>()
+            session.txnStatus shouldBe 'I'
+            (session.executeSql("SELECT * FROM t") as ExecuteResult.Selected).rows.size shouldBe 1
+        }
+    }
+
+    @Test
+    fun `트랜잭션 중 파싱 오류와 바인딩 오류도 E 상태로 만든다`() {
+        db.createSession().use { session ->
+            session.executeSql("BEGIN")
+            shouldThrow<BindException> { session.executeSql("SELECT * FROM nope") }
+            session.txnStatus shouldBe 'E'
+            session.executeSql("ROLLBACK")
+
+            session.executeSql("BEGIN")
+            shouldThrow<ParseException> { session.executeSql("SELEC 1") }
+            session.txnStatus shouldBe 'E'
+            session.executeSql("ROLLBACK")
+        }
+    }
+
+    @Test
+    fun `auto-commit 오류는 E 상태를 만들지 않는다`() {
+        db.createSession().use { session ->
+            shouldThrow<UniqueViolationException> { session.executeSql("INSERT INTO t (id) VALUES (1)") }
+            session.txnStatus shouldBe 'I'
+            session.executeSql("INSERT INTO t (id) VALUES (2)").shouldBeInstanceOf<ExecuteResult.Inserted>()
+        }
+    }
+
+    @Test
+    fun `E 상태의 트랜잭션은 잠금을 이미 해제했으므로 다른 세션이 대기 없이 진행한다`() {
+        db.createSession().use { s1 ->
+            s1.executeSql("BEGIN")
+            s1.executeSql("UPDATE t SET id = 5 WHERE id = 1")
+            shouldThrow<BindException> { s1.executeSql("SELECT * FROM nope") }
+
+            db.createSession().use { s2 ->
+                s2.lockTimeoutMillis = 500
+                s2.executeSql("UPDATE t SET id = 7 WHERE id = 1").shouldBeInstanceOf<ExecuteResult.Updated>()
+            }
+            s1.executeSql("ROLLBACK")
         }
     }
 }
