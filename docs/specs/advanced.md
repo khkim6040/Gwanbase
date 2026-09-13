@@ -487,6 +487,41 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 
 ---
 
+## Correctness Hardening
+
+MVP 기능이 갖춰진 뒤 동료 리뷰(2026-09-12)에서 나온 정확성 결함을 순서대로 메운다.
+세션 실패 상태(22번)는 Constraints 축에 두었고, 이후 항목은 여기에 둔다.
+
+### 24. 영향 행 수 (affected-row count) ✅
+
+`UPDATE`/`DELETE`의 결과 행 수. 이전에는 잠금 없이 스캔해 모은 후보 RID 수
+(`matches.size`, `toDelete.size`)를 그대로 돌려줘, 잠금 대기 중 다른 트랜잭션이 지운
+행도 세었다.
+
+**PostgreSQL 방식**
+
+- `ExecModifyTable()`이 `ExecUpdate()`/`ExecDelete()`가 실제로 튜플을 바꿨을 때만
+  `estate->es_processed++`. command tag `UPDATE n` / `DELETE n`의 n이 이 값이다.
+- `heap_update()`/`heap_delete()`가 `TM_Deleted`(다른 트랜잭션이 이미 지움)나
+  `TM_SelfModified`(같은 명령이 이미 처리)를 돌려주면 그 행은 건너뛰고 세지 않는다.
+  `TM_Updated`는 READ COMMITTED에서 EvalPlanQual로 재검사한다(3번 항목, 별도).
+
+**Gwanbase 구현**
+
+| 항목 | 구현 | PostgreSQL과의 차이 | 이유 |
+|------|------|---------------------|------|
+| UPDATE 카운트 | X 잠금 후 재조회(`getTuple`)가 null이면 건너뛰고, `updateTuple`이 실행된 행만 센다 | `TM_Deleted` 건너뛰기와 동일 | 후보 수가 아니라 변경 수가 command tag의 정의 |
+| DELETE 카운트 | `deleteTuple`의 반환값(슬롯이 살아 있었는지)이 true인 행만 센다 | 동일 | 이미 지워진 슬롯은 `SlottedPage.deleteRecord`가 false를 돌려주므로 재조회 없이 판별된다 |
+| WHERE 재평가 | 없음 — 잠금 후 튜플이 바뀌어 조건이 깨져도 센다 | PG는 EvalPlanQual로 재검사 | 3번 항목(predicate recheck)에서 다룬다 |
+
+**참고 자료**
+
+- [PostgreSQL 문서: UPDATE — Outputs](https://www.postgresql.org/docs/current/sql-update.html), [DELETE — Outputs](https://www.postgresql.org/docs/current/sql-delete.html) — "count is the number of rows updated/deleted"
+- [`src/backend/executor/nodeModifyTable.c`](https://github.com/postgres/postgres/blob/master/src/backend/executor/nodeModifyTable.c) — `ExecDelete()`/`ExecUpdate()`의 `TM_Deleted`·`TM_SelfModified` 분기, `ExecModifyTable()`의 `es_processed++`
+- [`src/include/access/tableam.h`](https://github.com/postgres/postgres/blob/master/src/include/access/tableam.h) — `TM_Result` 열거형
+
+---
+
 ## 우선순위 가이드
 
 ### Query Optimizer
@@ -529,6 +564,15 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 | 5 | FK / CHECK ✅ | UNIQUE 위에 구축 |
 | 6 | 트랜잭션 실패 상태 ✅ | 오류 후 ROLLBACK 계약 — 서버·플레이그라운드 상태기계 중복 제거 |
 | 7 | Serialization Failure | MVCC 선행 필요 |
+
+### Correctness Hardening
+
+| 순위 | 항목 | 이유 |
+|------|------|------|
+| 1 | 세션 실패 상태 ✅ (22번) | 오류 후 ROLLBACK 계약 |
+| 2 | 영향 행 수 ✅ (24번) | command tag 정확성, 낮은 비용 |
+| 3 | UPDATE/DELETE predicate recheck | 잠금 후 바뀐 행에 WHERE 재평가 (PG EvalPlanQual) |
+| 4 | B+Tree 쓰기 동기화 | 트리 단위 RW 락부터, latch crabbing은 이후 |
 
 ## 참고 자료
 
