@@ -4,6 +4,7 @@ import gwanbase.storage.BufferPoolManager
 import gwanbase.storage.DiskManager
 import io.kotest.matchers.booleans.shouldBeFalse
 import io.kotest.matchers.booleans.shouldBeTrue
+import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.AfterEach
@@ -11,6 +12,8 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * 트리 레벨 B+Tree 동작 테스트.
@@ -31,7 +34,7 @@ class BPlusTreeTest {
     @BeforeEach
     fun setUp() {
         diskManager = DiskManager(tempDir.resolve("test.db"))
-        bpm = BufferPoolManager(diskManager, poolSize = 16)
+        bpm = BufferPoolManager(diskManager, poolSize = 64)
         tree = BPlusTree.createNew(bpm)
     }
 
@@ -252,6 +255,36 @@ class BPlusTreeTest {
         val result = tree.scan(ByteArray(0), null).asSequence().toList()
 
         result.size shouldBe 20
+    }
+
+    @Test
+    fun `여러 스레드가 동시에 삽입해도 모든 키가 조회되고 scan 정렬 불변식이 유지된다`() {
+        val threads = 4
+        val perThread = 500
+        val pool = Executors.newFixedThreadPool(threads)
+        val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+        repeat(threads) { t ->
+            pool.submit {
+                try {
+                    for (i in t until threads * perThread step threads) {
+                        tree.insert(formatKey(i), formatValue(i))
+                    }
+                } catch (e: Throwable) {
+                    failures.add(e)
+                }
+            }
+        }
+        pool.shutdown()
+        pool.awaitTermination(30, TimeUnit.SECONDS).shouldBeTrue()
+        failures.shouldBeEmpty()
+
+        val total = threads * perThread
+        for (i in 0 until total) {
+            tree.search(formatKey(i)) shouldBe formatValue(i)
+        }
+        val keys = tree.scan(ByteArray(0), null).asSequence().map { String(it.first) }.toList()
+        keys.size shouldBe total
+        keys shouldBe keys.sorted()
     }
 
     private fun formatKey(i: Int): ByteArray = "key-%06d".format(i).toByteArray()
