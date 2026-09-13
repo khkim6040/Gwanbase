@@ -512,13 +512,45 @@ MVP 기능이 갖춰진 뒤 동료 리뷰(2026-09-12)에서 나온 정확성 결
 |------|------|---------------------|------|
 | UPDATE 카운트 | X 잠금 후 재조회(`getTuple`)가 null이면 건너뛰고, `updateTuple`이 실행된 행만 센다 | `TM_Deleted` 건너뛰기와 동일 | 후보 수가 아니라 변경 수가 command tag의 정의 |
 | DELETE 카운트 | `deleteTuple`의 반환값(슬롯이 살아 있었는지)이 true인 행만 센다 | 동일 | 이미 지워진 슬롯은 `SlottedPage.deleteRecord`가 false를 돌려주므로 재조회 없이 판별된다 |
-| WHERE 재평가 | 없음 — 잠금 후 튜플이 바뀌어 조건이 깨져도 센다 | PG는 EvalPlanQual로 재검사 | 3번 항목(predicate recheck)에서 다룬다 |
+| WHERE 재평가 | 25번 항목에서 처리 | — | — |
 
 **참고 자료**
 
 - [PostgreSQL 문서: UPDATE — Outputs](https://www.postgresql.org/docs/current/sql-update.html), [DELETE — Outputs](https://www.postgresql.org/docs/current/sql-delete.html) — "count is the number of rows updated/deleted"
 - [`src/backend/executor/nodeModifyTable.c`](https://github.com/postgres/postgres/blob/master/src/backend/executor/nodeModifyTable.c) — `ExecDelete()`/`ExecUpdate()`의 `TM_Deleted`·`TM_SelfModified` 분기, `ExecModifyTable()`의 `es_processed++`
 - [`src/include/access/tableam.h`](https://github.com/postgres/postgres/blob/master/src/include/access/tableam.h) — `TM_Result` 열거형
+
+### 25. UPDATE/DELETE predicate recheck ✅
+
+UPDATE/DELETE 스캔은 잠금 없이 수행되고 변경 시점에 X 잠금을 잡는다(S→X 업그레이드
+데드락 회피). 잠금 대기 중 다른 트랜잭션이 행을 **수정**해 WHERE 조건이 더 이상 참이
+아니어도, 깨어난 트랜잭션은 stale RID로 그 행을 그대로 UPDATE/DELETE 했다.
+24번은 지워진 행만 처리했고 바뀐 행은 이 항목에서 다룬다.
+
+**PostgreSQL 방식**
+
+- `heap_update()`/`heap_delete()`가 `TM_Updated`(다른 트랜잭션이 커밋한 새 버전 존재)를
+  돌려주면, READ COMMITTED에서 `ExecUpdate()`/`ExecDelete()`가 `EvalPlanQual()`을 호출한다.
+- `EvalPlanQual()`은 최신 버전 튜플을 잠근 뒤 계획의 qual(WHERE)을 그 튜플에 다시
+  평가한다. 실패하면 행을 건너뛰고 `es_processed`에 세지 않는다. 통과하면 새 버전을
+  대상으로 수정한다.
+- 스냅샷 시점에 조건에 맞지 않았지만 이후 커밋으로 맞게 된 행은 다시 찾지 않는다.
+
+**Gwanbase 구현**
+
+| 항목 | 구현 | PostgreSQL과의 차이 | 이유 |
+|------|------|---------------------|------|
+| 재평가 시점 | X 잠금 획득 → `getTuple` 재조회 → `stillMatches()`로 WHERE 재평가. 실패 시 `continue` | PG는 `TM_Updated`일 때만 EvalPlanQual. Gwanbase는 항상 재평가 | MVCC 버전 체인이 없어 "바뀌었는지"를 알 수 없다. 튜플당 표현식 평가 한 번이 비용의 전부 |
+| DELETE 경로 | FK 부모 여부와 무관하게 항상 잠금 → 재조회 → 재평가로 통일. `deleteTupleWithLock`의 재잠금은 재진입이라 무해 | 동일 | 이전에는 FK 부모가 아닌 테이블만 재조회 없이 바로 삭제해 재평가 지점이 없었다 |
+| 새로 조건에 맞게 된 행 | 재스캔하지 않는다 | 동일 | PG도 스냅샷 밖 행은 찾지 않는다. Strict 2PL에서 이 행은 대기 중 상대가 X를 쥐고 있었으므로 직렬 순서상 우리 트랜잭션 이후로 볼 수 있다 |
+| 영향 행 수 | 재평가 실패 행은 세지 않는다 | 동일 | 24번과 같은 원칙 — 실제 변경 수가 command tag |
+
+**참고 자료**
+
+- [PostgreSQL 문서: 13.2.1 Read Committed Isolation Level](https://www.postgresql.org/docs/current/transaction-iso.html#XACT-READ-COMMITTED) — "the would-be updater will wait for the first updating transaction to commit or roll back ... re-evaluate the search condition (the WHERE clause)"
+- [`src/backend/executor/execMain.c`](https://github.com/postgres/postgres/blob/master/src/backend/executor/execMain.c) — `EvalPlanQual()`, `EvalPlanQualNext()`
+- [`src/backend/executor/nodeModifyTable.c`](https://github.com/postgres/postgres/blob/master/src/backend/executor/nodeModifyTable.c) — `ExecUpdate()`/`ExecDelete()`의 `TM_Updated` 분기에서 `EvalPlanQual` 호출
+- [`src/backend/access/heap/heapam.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/heap/heapam.c) — `heap_update()`/`heap_delete()`의 `TM_Updated` 반환
 
 ---
 
@@ -571,7 +603,7 @@ MVP 기능이 갖춰진 뒤 동료 리뷰(2026-09-12)에서 나온 정확성 결
 |------|------|------|
 | 1 | 세션 실패 상태 ✅ (22번) | 오류 후 ROLLBACK 계약 |
 | 2 | 영향 행 수 ✅ (24번) | command tag 정확성, 낮은 비용 |
-| 3 | UPDATE/DELETE predicate recheck | 잠금 후 바뀐 행에 WHERE 재평가 (PG EvalPlanQual) |
+| 3 | UPDATE/DELETE predicate recheck ✅ (25번) | 잠금 후 바뀐 행에 WHERE 재평가 (PG EvalPlanQual) |
 | 4 | B+Tree 쓰기 동기화 | 트리 단위 RW 락부터, latch crabbing은 이후 |
 
 ## 참고 자료
