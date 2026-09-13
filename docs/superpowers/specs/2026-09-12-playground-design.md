@@ -136,8 +136,8 @@ GwanServer는 연결당 스레드 하나라 드러나지 않던 전제였다).
 
 ## 배포
 
-- `fly launch --no-deploy`로 만든 `fly.toml`을 커밋하고 `fly deploy`는 수동으로 한다.
-- CI 자동 배포(`superfly/flyctl-actions`)는 첫 배포가 안정된 뒤 별도 PR로 한다.
+- `fly launch --no-deploy --copy-config --yes`로 앱을 만들고, fly가 재작성한 `fly.toml`을 커밋한다.
+- CI 자동 배포: `fly launch`가 생성한 `.github/workflows/fly-deploy.yml`(`superfly/flyctl-actions`, `FLY_API_TOKEN` 시크릿)을 함께 포함한다. main에 push될 때마다 원격 빌더로 배포된다.
 - README에 플레이그라운드 URL을 한 줄 추가한다.
 
 ## 범위 밖
