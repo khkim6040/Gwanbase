@@ -2,6 +2,7 @@ package gwanbase.playground
 
 import gwanbase.sql.ExecuteResult
 import gwanbase.table.Database
+import gwanbase.txn.TransactionAbortedException
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach

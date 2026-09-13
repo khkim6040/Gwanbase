@@ -23,6 +23,24 @@ class DatabaseSession(
     private var currentTxn: TransactionContext? = null
 
     /**
+     * 명시적 트랜잭션 안에서 오류가 난 뒤 ROLLBACK/COMMIT을 받기 전까지 true.
+     *
+     * PostgreSQL은 오류 시점에 `AbortTransaction()`으로 undo와 잠금 해제를 즉시 끝내고, 블록 상태만
+     * `TBLOCK_ABORT`로 남겨 이후 문장을 25P02로 거부한다. Gwanbase도 abort는 즉시 하고 이 플래그만 남긴다.
+     * https://github.com/postgres/postgres/blob/master/src/backend/access/transam/xact.c
+     * (`AbortTransaction`, `AbortCurrentTransaction`, `EndTransactionBlock`의 `TBLOCK_ABORT` 분기)
+     */
+    private var txnFailed = false
+
+    /** 트랜잭션 상태. PostgreSQL ReadyForQuery·libpq `PQtransactionStatus`와 같은 I(idle) / T(진행 중) / E(실패) 3값. */
+    val txnStatus: Char
+        get() = when {
+            txnFailed -> 'E'
+            currentTxn != null -> 'T'
+            else -> 'I'
+        }
+
+    /**
      * 잠금 최대 대기 시간 (ms). 0이면 무한 대기. PostgreSQL `lock_timeout` GUC에 해당한다.
      * 초과 시 LockTimeoutException(55P03)이 발생하고 트랜잭션은 abort된다.
      */
@@ -40,17 +58,40 @@ class DatabaseSession(
      * 활성 트랜잭션이 없으면 auto-commit 모드로 실행한다.
      */
     fun executeSql(sql: String): ExecuteResult {
-        val tokens = Lexer(sql).tokenize()
-        val statement = Parser(tokens).parse()
+        if (txnFailed) return executeInFailedTxn(sql)
         // 호출 스레드에 이 세션의 활성 트랜잭션을 바인딩하고 끝나면 반드시 푼다.
         // WalCallbackImpl은 ThreadLocal로 현재 트랜잭션을 찾으므로, 세션이 요청마다 다른
         // 스레드에서 실행되는 환경(스레드 풀)에서는 호출 단위로 바인딩해야 한다.
         database.currentTxnHolder.set(currentTxn)
         try {
+            val tokens = Lexer(sql).tokenize()
+            val statement = Parser(tokens).parse()
             return execute(statement)
+        } catch (e: ParseException) {
+            failTransaction()
+            throw e
         } finally {
             database.currentTxnHolder.remove()
         }
+    }
+
+    /**
+     * 실패한 트랜잭션 블록의 문장 처리. abort는 이미 끝났으므로 ROLLBACK/COMMIT은 상태만 정리한다.
+     * PostgreSQL도 aborted 블록의 COMMIT은 오류 없이 `ROLLBACK` 태그를 돌려준다
+     * (`EndTransactionBlock()`이 false 반환 → `standard_ProcessUtility`가 `CMDTAG_ROLLBACK` 설정).
+     */
+    private fun executeInFailedTxn(sql: String): ExecuteResult {
+        val statement = runCatching { Parser(Lexer(sql).tokenize()).parse() }.getOrNull()
+        if (statement !is Statement.Rollback && statement !is Statement.Commit) throw TransactionAbortedException()
+        txnFailed = false
+        return ExecuteResult.TransactionRolledBack
+    }
+
+    /** 명시적 트랜잭션 안에서 오류가 났을 때: 즉시 abort하고 실패 상태로 남긴다. auto-commit이면 아무것도 안 한다. */
+    private fun failTransaction() {
+        val txn = currentTxn ?: return
+        abortInternal(txn)
+        txnFailed = true
     }
 
     private fun execute(statement: Statement): ExecuteResult {
@@ -68,19 +109,15 @@ class DatabaseSession(
                 ExecuteResult.TransactionRolledBack
             }
             else -> {
-                val binder = Binder(database.getCatalog())
-                binder.bind(statement)
-
                 val autoCommit = (currentTxn == null)
                 if (autoCommit) beginInternal()
                 try {
+                    Binder(database.getCatalog()).bind(statement)
                     val result = sqlExecutor.executeStatement(statement)
                     if (autoCommit) commitInternal(currentTxn!!)
                     result
                 } catch (e: Throwable) {
-                    if (currentTxn != null) {
-                        abortInternal(currentTxn!!)
-                    }
+                    if (autoCommit) currentTxn?.let { abortInternal(it) } else failTransaction()
                     throw e
                 }
             }

@@ -89,10 +89,8 @@ GwanServer는 연결당 스레드 하나라 드러나지 않던 전제였다).
   트랜잭션을 abort하고 잠금을 풀므로, 브라우저를 닫고 떠난 방문자가 잠금을
   영원히 쥐는 일을 막는다. 이것이 공유 DB 모델에서 가장 중요한 안전장치다.
 - `/reset`은 `ReentrantReadWriteLock`의 write 락, 나머지 요청은 read 락을 잡는다.
-- 트랜잭션 상태(I/T/E)는 `ConnectionHandler`와 같은 3필드 상태기계
-  (`inTransaction`, `txnFailed`, 결과 타입·예외로 갱신)를 플레이그라운드
-  세션 래퍼에 둔다. `ponytail:` 표시 — 세션 계층 FAILED state가
-  `DatabaseSession`으로 들어오면 두 곳 모두 제거한다.
+- 트랜잭션 상태(I/T/E)와 실패한 블록의 25P02 거부는 `DatabaseSession.txnStatus`가
+  담당한다(`advanced.md` 22번). 세션 래퍼는 직렬화와 `lastUsedAt` 갱신만 한다.
 
 ## 안전 상한
 

@@ -102,7 +102,7 @@ class PlaygroundServer(
                 val result = session.execute(sql)
                 ex.respond(200, Json.encode(Json.result(result, session.txnStatus, MAX_ROWS)))
             } catch (e: Exception) {
-                val sqlState = if (e is TransactionAbortedException) "25P02" else ConnectionHandler.sqlStateOf(e)
+                val sqlState = ConnectionHandler.sqlStateOf(e)
                 ex.respond(400, Json.encode(mapOf(
                     "error" to (e.message ?: e::class.simpleName),
                     "sqlState" to sqlState,

@@ -443,7 +443,43 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 - [`src/backend/commands/tablecmds.c`](https://github.com/postgres/postgres/blob/master/src/backend/commands/tablecmds.c) — `transformFkeyCheckAttrs()` (참조 컬럼의 유일 인덱스 요구), `ATAddForeignKeyConstraint()`
 - [`src/backend/commands/indexcmds.c`](https://github.com/postgres/postgres/blob/master/src/backend/commands/indexcmds.c) — `ChooseConstraintName()`
 
-### 22. Serialization Failure (40001)
+### 22. 트랜잭션 실패 상태 (25P02) ✅
+
+명시적 트랜잭션 안에서 오류가 난 뒤의 세션 동작. 이전에는 `ConnectionHandler`와
+플레이그라운드가 각자 I/T/E 상태기계를 갖고 있었고, `DatabaseSession`은 실행 단계 오류에
+즉시 abort해 이후 `ROLLBACK`이 `IllegalStateException`을 던졌다(플레이그라운드는 `catch`로 우회).
+
+**PostgreSQL 방식**
+
+- 오류가 나면 `AbortCurrentTransaction()` → `AbortTransaction()`이 **그 자리에서** undo·잠금
+  해제·리소스 정리를 끝내고, 블록 상태만 `TBLOCK_ABORT`로 남긴다.
+- 이후 문장은 `exec_simple_query()`에서 `IsAbortedTransactionBlockState() &&
+  !IsTransactionExitStmt()` → 25P02 `current transaction is aborted, commands ignored
+  until end of transaction block`.
+- `ROLLBACK`은 `CleanupTransaction()`만 수행한다. `COMMIT`은 `EndTransactionBlock()`이
+  false를 돌려주고 `standard_ProcessUtility()`가 command tag를 `ROLLBACK`으로 바꾼다 —
+  오류가 아니다.
+- ReadyForQuery의 트랜잭션 상태 바이트(I/T/E)와 libpq `PQtransactionStatus()`가 같은 3값을 노출한다.
+
+**Gwanbase 구현**
+
+| 항목 | 구현 | PostgreSQL과의 차이 | 이유 |
+|------|------|---------------------|------|
+| 실패 진입 | `DatabaseSession.executeSql`이 파싱·바인딩·실행 어느 단계 오류든 명시적 트랜잭션이면 `abortInternal()`(undo + 잠금 해제) 후 `txnFailed = true`. auto-commit은 abort만 하고 플래그를 세우지 않는다 | 동일. 잠금은 오류 시점에 즉시 풀린다 | 잠금 보유를 ROLLBACK까지 미루면 실패한 세션이 다른 세션을 막는다. PG가 즉시 푸는 이유와 같다 |
+| 실패 상태의 문장 | `ROLLBACK`/`COMMIT` → 플래그만 지우고 `TransactionRolledBack` 반환. 그 외(파싱 실패 포함) → `TransactionAbortedException`(25P02) | 동일 | abort는 이미 끝났으므로 상태 정리만 남는다 |
+| 상태 노출 | `DatabaseSession.txnStatus: Char` (I/T/E) | libpq `PQtransactionStatus`와 같은 3값 | 서버·플레이그라운드가 각자 상태기계를 갖지 않고 세션 하나만 보게 한다 |
+| 중첩 BEGIN | 기존대로 `IllegalStateException`, 실패 상태로 가지 않음 | PG는 WARNING만 내고 무시한다 | 트랜잭션 제어문 오류는 블록을 망가뜨리지 않는다. 경고 채널이 없어 예외로 남긴다 |
+| 클라이언트 | `ConnectionHandler`·`PlaygroundSession`은 `session.txnStatus`만 읽고, 25P02 판별·ROLLBACK 문자열 비교·`IllegalStateException` 우회를 모두 삭제 | — | 상태의 진실은 세션 한 곳 |
+
+**참고 자료**
+
+- [PostgreSQL 문서: Error Codes](https://www.postgresql.org/docs/current/errcodes-appendix.html) — 25P02 `in_failed_sql_transaction`
+- [PostgreSQL 문서: Message Flow — ReadyForQuery](https://www.postgresql.org/docs/current/protocol-flow.html) — 트랜잭션 상태 바이트 I/T/E
+- [`src/backend/access/transam/xact.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/transam/xact.c) — `AbortTransaction()`, `AbortCurrentTransaction()`, `EndTransactionBlock()`의 `TBLOCK_ABORT` 분기, `IsAbortedTransactionBlockState()`
+- [`src/backend/tcop/postgres.c`](https://github.com/postgres/postgres/blob/master/src/backend/tcop/postgres.c) — `exec_simple_query()`의 25P02 검사, `IsTransactionExitStmt()`
+- [`src/backend/tcop/utility.c`](https://github.com/postgres/postgres/blob/master/src/backend/tcop/utility.c) — `standard_ProcessUtility()` `TRANS_STMT_COMMIT`: 실패 시 `CMDTAG_ROLLBACK`
+
+### 23. Serialization Failure (40001)
 
 - 2PL에서는 발생하지 않는다. write-write 충돌은 대기 또는 데드락으로 해소된다.
 - MVCC + Snapshot Isolation 도입 후에야 재현 가능. 별도 Phase급 작업.
@@ -491,7 +527,8 @@ Gwanbase에서 재현하는 것이 목표다. 에러는 PostgreSQL SQLSTATE 코�
 | 3 | 락 타임아웃 ✅ | 무한 대기 제거, 운영 안정성 |
 | 4 | UNIQUE / PK ✅ | 중복 키 에러 — 실무에서 가장 빈번한 재시도 대상 |
 | 5 | FK / CHECK ✅ | UNIQUE 위에 구축 |
-| 6 | Serialization Failure | MVCC 선행 필요 |
+| 6 | 트랜잭션 실패 상태 ✅ | 오류 후 ROLLBACK 계약 — 서버·플레이그라운드 상태기계 중복 제거 |
+| 7 | Serialization Failure | MVCC 선행 필요 |
 
 ## 참고 자료
 

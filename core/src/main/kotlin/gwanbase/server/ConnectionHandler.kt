@@ -2,7 +2,6 @@ package gwanbase.server
 
 import gwanbase.sql.BindException
 import gwanbase.sql.DataException
-import gwanbase.sql.ExecuteResult
 import gwanbase.sql.ParseException
 import gwanbase.table.Database
 import gwanbase.table.ConstraintViolationException
@@ -10,6 +9,7 @@ import gwanbase.table.UniqueViolationException
 import gwanbase.txn.DatabaseSession
 import gwanbase.txn.DeadlockException
 import gwanbase.txn.LockTimeoutException
+import gwanbase.txn.TransactionAbortedException
 import mu.KotlinLogging
 import java.io.EOFException
 import java.net.Socket
@@ -27,9 +27,6 @@ class ConnectionHandler(
     private val socket: Socket,
     private val database: Database,
 ) : Runnable {
-
-    private var inTransaction = false
-    private var txnFailed = false
 
     override fun run() {
         try {
@@ -81,81 +78,32 @@ class ConnectionHandler(
                 is PgMessage.Query -> handleQuery(msg.sql, session, writer)
                 else -> {
                     writer.write(PgMessage.ErrorResponse("ERROR", "지원하지 않는 메시지", "XX000"))
-                    writer.write(PgMessage.ReadyForQuery(currentTxnStatus()))
+                    writer.write(PgMessage.ReadyForQuery(session.txnStatus))
                     writer.flush()
                 }
             }
         }
     }
 
+    /**
+     * 쿼리 하나를 실행하고 결과 또는 오류를 쓴다.
+     * 트랜잭션 상태(I/T/E)와 실패한 블록의 25P02 거부는 [DatabaseSession]이 담당하므로 여기서는 결과만 전달한다.
+     */
     private fun handleQuery(sql: String, session: DatabaseSession, writer: PgMessageWriter) {
-        if (txnFailed && !isRollbackCommand(sql)) {
-            writer.write(PgMessage.ErrorResponse(
-                "ERROR",
-                "current transaction is aborted, commands ignored until end of transaction block",
-                "25P02",
-            ))
-            writer.write(PgMessage.ReadyForQuery('E'))
-            writer.flush()
-            return
-        }
-
         try {
             val result = session.executeSql(sql)
-            updateTxnState(result)
-            val messages = ResultFormatter.format(result)
-            for (m in messages) {
+            for (m in ResultFormatter.format(result)) {
                 writer.write(m)
             }
-            writer.write(PgMessage.ReadyForQuery(currentTxnStatus()))
-            writer.flush()
         } catch (e: Exception) {
-            if (inTransaction) txnFailed = true
             writer.write(PgMessage.ErrorResponse(
                 severity = "ERROR",
                 message = e.message ?: "내부 오류",
                 code = sqlStateOf(e),
             ))
-            writer.write(PgMessage.ReadyForQuery(currentTxnStatus()))
-            writer.flush()
         }
-    }
-
-    /**
-     * ExecuteResult 타입을 기반으로 트랜잭션 상태를 갱신한다.
-     *
-     * SQL 문자열 비교 대신 실행 결과 타입으로 판단하여
-     * 세미콜론, 공백 변형 등에 안전하다.
-     */
-    private fun updateTxnState(result: ExecuteResult) {
-        when (result) {
-            is ExecuteResult.TransactionStarted -> {
-                inTransaction = true
-                txnFailed = false
-            }
-            is ExecuteResult.TransactionCommitted,
-            is ExecuteResult.TransactionRolledBack -> {
-                inTransaction = false
-                txnFailed = false
-            }
-            else -> {}
-        }
-    }
-
-    /**
-     * txnFailed 상태에서 ROLLBACK 명령을 허용하기 위한 판별.
-     *
-     * 세미콜론, 대소문자, 앞뒤 공백을 정규화하여 비교한다.
-     */
-    private fun isRollbackCommand(sql: String): Boolean {
-        val normalized = sql.trim().removeSuffix(";").trim().uppercase()
-        return normalized == "ROLLBACK"
-    }
-
-    private fun currentTxnStatus(): Char = when {
-        txnFailed -> 'E'
-        inTransaction -> 'T'
-        else -> 'I'
+        writer.write(PgMessage.ReadyForQuery(session.txnStatus))
+        writer.flush()
     }
 
     companion object {
@@ -170,6 +118,7 @@ class ConnectionHandler(
             is BindException -> "42000"     // syntax_error_or_access_rule_violation
             is DeadlockException -> "40P01" // deadlock_detected
             is LockTimeoutException -> "55P03" // lock_not_available
+            is TransactionAbortedException -> "25P02" // in_failed_sql_transaction
             is DataException -> e.sqlState  // Class 22: data_exception
             is UniqueViolationException -> e.sqlState // 23505: unique_violation
             is ConstraintViolationException -> e.sqlState // 23503 / 23514
