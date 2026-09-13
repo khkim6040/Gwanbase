@@ -384,4 +384,30 @@ class DatabaseTest {
             entries shouldHaveSize threads * perThread
         }
     }
+
+    @Test
+    fun `여러 스레드가 동시에 insertTuple해도 scanTable 건수가 일치한다`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", userSchema)
+            val threads = 4
+            val perThread = 500
+            val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+            val workers = (0 until threads).map { t ->
+                Thread {
+                    try {
+                        for (i in t until threads * perThread step threads) {
+                            db.insertTuple("users", Tuple(userSchema, arrayOf(i, "user-$i", true)))
+                        }
+                    } catch (e: Throwable) {
+                        failures.add(e)
+                    }
+                }
+            }
+            workers.forEach { it.start() }
+            workers.forEach { it.join(30_000) }
+            failures shouldHaveSize 0
+
+            db.scanTable("users").asSequence().toList() shouldHaveSize threads * perThread
+        }
+    }
 }
