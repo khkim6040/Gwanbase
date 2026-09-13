@@ -359,11 +359,11 @@ class ConcurrencyIntegrationTest {
     // ── affected-row count ──
 
     /**
-     * s1이 id=1 행의 X 잠금을 쥔 채로 그 행을 삭제·커밋하는 동안,
+     * s1이 id=1 행의 X 잠금을 쥔 채로 [s1Mutation]을 실행·커밋하는 동안,
      * s2가 같은 행을 대상으로 [sql]을 실행한 결과를 반환한다.
-     * s2는 잠금 없이 스캔한 stale RID로 잠금 대기에 들어가고, 깨어났을 때 행은 이미 없다.
+     * s2는 잠금 없이 스캔한 stale RID로 잠금 대기에 들어가고, 깨어났을 때 행은 이미 바뀌어 있다.
      */
-    private fun runAgainstRowDeletedWhileWaiting(sql: String): ExecuteResult {
+    private fun runAgainstRowChangedWhileWaiting(s1Mutation: String, sql: String): ExecuteResult {
         val s1Locked = CountDownLatch(1)
         val s2Started = CountDownLatch(1)
         val s2Result = AtomicReference<ExecuteResult?>(null)
@@ -375,7 +375,7 @@ class ConcurrencyIntegrationTest {
                 s1Locked.countDown()
                 s2Started.await()
                 Thread.sleep(100) // s2가 대기 큐에 들어갈 시간
-                s1.executeSql("DELETE FROM t WHERE id = 1")
+                s1.executeSql(s1Mutation)
                 s1.executeSql("COMMIT")
             }
         }
@@ -391,11 +391,29 @@ class ConcurrencyIntegrationTest {
 
     @Test
     fun `잠금 대기 중 삭제된 행은 DELETE 영향 행 수에 포함되지 않는다`() {
-        runAgainstRowDeletedWhileWaiting("DELETE FROM t WHERE id = 1") shouldBe ExecuteResult.Deleted(0)
+        runAgainstRowChangedWhileWaiting("DELETE FROM t WHERE id = 1", "DELETE FROM t WHERE id = 1") shouldBe ExecuteResult.Deleted(0)
     }
 
     @Test
     fun `잠금 대기 중 삭제된 행은 UPDATE 영향 행 수에 포함되지 않는다`() {
-        runAgainstRowDeletedWhileWaiting("UPDATE t SET val = 5 WHERE id = 1") shouldBe ExecuteResult.Updated(0)
+        runAgainstRowChangedWhileWaiting("DELETE FROM t WHERE id = 1", "UPDATE t SET val = 5 WHERE id = 1") shouldBe ExecuteResult.Updated(0)
+    }
+
+    @Test
+    fun `잠금 대기 중 WHERE 조건이 깨진 행은 DELETE 대상에서 제외된다`() {
+        runAgainstRowChangedWhileWaiting("UPDATE t SET id = 99 WHERE id = 1", "DELETE FROM t WHERE id = 1") shouldBe ExecuteResult.Deleted(0)
+        (db.executeSql("SELECT * FROM t WHERE id = 99") as ExecuteResult.Selected).rows.size shouldBe 1
+    }
+
+    @Test
+    fun `잠금 대기 중 WHERE 조건이 깨진 행은 UPDATE 대상에서 제외된다`() {
+        runAgainstRowChangedWhileWaiting("UPDATE t SET id = 99 WHERE id = 1", "UPDATE t SET val = 5 WHERE id = 1") shouldBe ExecuteResult.Updated(0)
+        (db.executeSql("SELECT val FROM t WHERE id = 99") as ExecuteResult.Selected).rows[0][0] shouldBe 100
+    }
+
+    @Test
+    fun `잠금 대기 중 바뀌었지만 WHERE 조건이 유지된 행은 UPDATE 된다`() {
+        runAgainstRowChangedWhileWaiting("UPDATE t SET val = 150 WHERE id = 1", "UPDATE t SET val = 5 WHERE id = 1") shouldBe ExecuteResult.Updated(1)
+        (db.executeSql("SELECT val FROM t WHERE id = 1") as ExecuteResult.Selected).rows[0][0] shouldBe 5
     }
 }

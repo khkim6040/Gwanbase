@@ -258,6 +258,7 @@ class SqlExecutor(
                 session.acquireExclusiveLock(stmt.tableName, rid)
             }
             val freshTuple = database.getTuple(stmt.tableName, rid) ?: continue
+            if (!stillMatches(schema, freshTuple, stmt.where)) continue
             val newValues = Array<Any?>(schema.columnCount) { i ->
                 ExpressionEvaluator.getTupleValue(freshTuple, i, schema.column(i).type)
             }
@@ -277,7 +278,7 @@ class SqlExecutor(
             updated++
         }
 
-        // 잠금 대기 중 다른 트랜잭션이 지운 행(재조회 실패)은 세지 않는다.
+        // 잠금 대기 중 다른 트랜잭션이 지운 행(재조회 실패)이나 WHERE 조건이 깨진 행은 세지 않는다.
         return ExecuteResult.Updated(updated)
     }
 
@@ -304,10 +305,12 @@ class SqlExecutor(
         val referenced = database.getCatalog().getForeignKeysReferencing(stmt.tableName).isNotEmpty()
         var deleted = 0
         for (rid in toDelete) {
+            // X 잠금 획득 후 최신 튜플을 다시 읽어 WHERE를 재평가한다.
+            // FK 부모인 경우 X 잠금을 먼저 잡아야 자식 삽입(부모 S 잠금)과 직렬화된다.
+            session?.acquireExclusiveLock(stmt.tableName, rid)
+            val tuple = database.getTuple(stmt.tableName, rid) ?: continue
+            if (!stillMatches(schema, tuple, stmt.where)) continue
             if (referenced) {
-                // 부모 X 잠금을 먼저 잡아야 자식 삽입(부모 S 잠금)과 직렬화된다
-                session?.acquireExclusiveLock(stmt.tableName, rid)
-                val tuple = database.getTuple(stmt.tableName, rid) ?: continue
                 checkNoReferencingRows(stmt.tableName, schema, tuple, null, rid)
             }
             val removed = session?.deleteTupleWithLock(stmt.tableName, rid)
@@ -315,8 +318,20 @@ class SqlExecutor(
             if (removed) deleted++
         }
 
-        // 잠금 대기 중 다른 트랜잭션이 이미 지운 슬롯은 deleteTuple이 false를 반환하므로 세지 않는다.
+        // 잠금 대기 중 다른 트랜잭션이 지운 행(재조회 실패)이나 WHERE 조건이 깨진 행은 세지 않는다.
         return ExecuteResult.Deleted(deleted)
+    }
+
+    /**
+     * X 잠금 획득 후 다시 읽은 튜플이 여전히 WHERE 조건을 만족하는지 검사한다.
+     *
+     * 스캔은 잠금 없이 수행되므로 잠금 대기 중 다른 트랜잭션이 행을 바꿔 조건이 깨질 수 있다.
+     * PostgreSQL이 READ COMMITTED에서 `TM_Updated`인 행에 대해
+     * [EvalPlanQual](https://github.com/postgres/postgres/blob/master/src/backend/executor/execMain.c)로
+     * 최신 버전에 qual을 재평가하는 것과 같은 역할이다.
+     */
+    private fun stillMatches(schema: Schema, tuple: Tuple, where: Expression?): Boolean {
+        return where == null || ExpressionEvaluator.evaluateCondition(schema, tuple, where)
     }
 
     // ── INSERT 전용 헬퍼 ──
