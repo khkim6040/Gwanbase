@@ -109,6 +109,46 @@ class DatabaseSessionTest {
         }
     }
 
+    /** 주어진 동작을 새 스레드에서 실행하고 끝날 때까지 기다린다. 스레드 내 예외는 호출 스레드로 전파한다. */
+    private fun onNewThread(action: () -> Unit) {
+        var err: Throwable? = null
+        val th = Thread { try { action() } catch (e: Throwable) { err = e } }
+        th.start(); th.join()
+        err?.let { throw it }
+    }
+
+    @Test
+    fun `BEGIN UPDATE ROLLBACK을 서로 다른 스레드에서 실행해도 롤백된다`() {
+        db.executeSql("CREATE TABLE t2 (id INT PRIMARY KEY, v INT)")
+        db.executeSql("INSERT INTO t2 (id, v) VALUES (1, 10)")
+        val session = db.createSession()
+        onNewThread { session.executeSql("BEGIN") }
+        onNewThread { session.executeSql("UPDATE t2 SET v = 99 WHERE id = 1") }
+        onNewThread { session.executeSql("ROLLBACK") }
+        session.close()
+
+        val r = db.executeSql("SELECT v FROM t2 WHERE id = 1") as ExecuteResult.Selected
+        r.rows.single().single() shouldBe 10
+    }
+
+    @Test
+    fun `다른 세션의 트랜잭션 중 UPDATE가 내 스레드에서 실행돼도 내 ROLLBACK이 그 커밋을 되돌리지 않는다`() {
+        db.executeSql("CREATE TABLE t2 (id INT PRIMARY KEY, v INT)")
+        db.executeSql("INSERT INTO t2 (id, v) VALUES (1, 10)")
+        val a = db.createSession()
+        val b = db.createSession()
+
+        a.executeSql("BEGIN")                       // 메인 스레드 홀더 = A의 트랜잭션
+        onNewThread { b.executeSql("BEGIN") }       // B의 홀더는 다른 스레드에만 남는다
+        b.executeSql("UPDATE t2 SET v = 77 WHERE id = 1") // 메인 스레드: 버그 시 A의 로그 체인에 기록된다
+        b.executeSql("COMMIT")
+        a.executeSql("ROLLBACK")                    // 버그 시 B가 커밋한 77을 10으로 되돌린다
+        a.close(); b.close()
+
+        val r = db.executeSql("SELECT v FROM t2 WHERE id = 1") as ExecuteResult.Selected
+        r.rows.single().single() shouldBe 77
+    }
+
     @Test
     fun `lockTimeoutMillis 초과 시 LockTimeoutException`() {
         db.executeSql("INSERT INTO t (id, name) VALUES (1, 'a')")

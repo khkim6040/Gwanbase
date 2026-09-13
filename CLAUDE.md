@@ -31,7 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 기술 스택
 
 - Language: Kotlin 1.9.22 (JVM 17)
-- Build: Gradle Kotlin DSL (멀티모듈: core, bench)
+- Build: Gradle Kotlin DSL (멀티모듈: core, bench, playground)
 - Test: JUnit 5 + Kotest assertions + Kotest property-based testing
 - Benchmark: JMH
 - Logging: kotlin-logging + Logback
@@ -71,6 +71,9 @@ Gwanbase/                      ← 프로젝트 루트 = Gradle 프로젝트 루
 │           └── server/
 ├── bench/                     ← JMH 벤치마크 모듈
 │   └── build.gradle.kts
+├── playground/                ← 웹 SQL 콘솔 (JDK HttpServer, Fly.io 배포)
+│   └── src/main/kotlin/gwanbase/playground/
+├── Dockerfile, fly.toml       ← playground 배포
 └── docs/                      ← Phase별 스펙 문서, 아키텍처 문서
 ```
 
@@ -214,6 +217,8 @@ MVP(Phase 0~8) 완성 후에는 `docs/specs/advanced.md`의 축별 우선순위 
 ./gradlew :core:test --tests "gwanbase.storage.DiskManagerTest"           # 특정 테스트 클래스
 ./gradlew :core:test --tests "gwanbase.storage.DiskManagerTest.빈 페이지*" # 특정 테스트 메서드
 ./gradlew bench:jmh                # JMH 벤치마크
+./gradlew :playground:test         # playground 모듈 테스트
+./gradlew :playground:run          # 로컬에서 플레이그라운드 실행 (http://localhost:8080)
 ```
 
 ## 작업 완료 체크리스트

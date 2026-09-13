@@ -13,6 +13,7 @@ import gwanbase.wal.TransactionContext
  *
  * 세션별로 독립적인 트랜잭션 상태를 관리하며, SQL 실행의 진입점이 된다.
  * auto-commit 모드와 명시적 트랜잭션(BEGIN/COMMIT/ROLLBACK)을 모두 지원한다.
+ * 한 세션의 호출은 동시에 실행되면 안 되지만(호출자가 직렬화), 호출마다 다른 스레드여도 된다.
  */
 class DatabaseSession(
     internal val database: Database,
@@ -41,7 +42,18 @@ class DatabaseSession(
     fun executeSql(sql: String): ExecuteResult {
         val tokens = Lexer(sql).tokenize()
         val statement = Parser(tokens).parse()
+        // 호출 스레드에 이 세션의 활성 트랜잭션을 바인딩하고 끝나면 반드시 푼다.
+        // WalCallbackImpl은 ThreadLocal로 현재 트랜잭션을 찾으므로, 세션이 요청마다 다른
+        // 스레드에서 실행되는 환경(스레드 풀)에서는 호출 단위로 바인딩해야 한다.
+        database.currentTxnHolder.set(currentTxn)
+        try {
+            return execute(statement)
+        } finally {
+            database.currentTxnHolder.remove()
+        }
+    }
 
+    private fun execute(statement: Statement): ExecuteResult {
         return when (statement) {
             is Statement.Begin -> {
                 begin()

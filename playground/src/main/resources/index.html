@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gwanbase Playground</title>
+<style>
+  :root { --bg:#f7f7f5; --panel:#fff; --line:#e2e2de; --text:#1f1f1f; --muted:#6b6b66; --accent:#2f6fdb; --err:#b3261e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--text); background:var(--bg); }
+  header { padding:12px 20px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; gap:12px; align-items:baseline; }
+  header h1 { font-size:16px; margin:0; }
+  header a, header span { color:var(--muted); font-size:13px; }
+  main { display:grid; grid-template-columns: 260px 1fr; min-height: calc(100vh - 49px); }
+  aside { border-right:1px solid var(--line); background:var(--panel); padding:16px; overflow:auto; }
+  aside h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 8px; }
+  .table { margin-bottom:14px; }
+  .table b { display:block; }
+  .table ul { list-style:none; margin:2px 0 0; padding:0 0 0 10px; color:var(--muted); font-size:13px; }
+  .table .idx { color:var(--accent); }
+  section { padding:16px 20px; display:flex; flex-direction:column; gap:12px; min-width:0; }
+  textarea { width:100%; height:110px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding:10px; border:1px solid var(--line); border-radius:6px; resize:vertical; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  button { font:inherit; padding:6px 12px; border:1px solid var(--line); border-radius:6px; background:var(--panel); cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.danger { color:var(--err); }
+  .examples button { font-size:12px; padding:4px 10px; }
+  #history { display:flex; flex-direction:column; gap:10px; }
+  .entry { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
+  .entry pre { margin:0 0 8px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre-wrap; }
+  .entry .meta { font-size:12px; color:var(--muted); display:flex; gap:8px; align-items:center; }
+  .badge { font: 11px/1 ui-monospace, monospace; padding:3px 6px; border-radius:4px; background:#eee; }
+  .badge.T { background:#dbeafe; color:#1e40af; } .badge.E { background:#fee2e2; color:#991b1b; }
+  .error { color:var(--err); }
+  table.result { border-collapse:collapse; font-size:13px; margin-top:6px; max-width:100%; display:block; overflow:auto; }
+  table.result th, table.result td { border:1px solid var(--line); padding:3px 8px; text-align:left; white-space:pre; }
+  table.result th { background:var(--bg); }
+  td.null { color:var(--muted); font-style:italic; }
+  @media (max-width: 720px) { main { grid-template-columns: 1fr; } aside { border-right:0; border-bottom:1px solid var(--line); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Gwanbase Playground</h1>
+  <span>Kotlin으로 밑바닥부터 만든 RDB · 모든 방문자가 같은 DB를 공유합니다</span>
+  <a href="https://github.com/khkim6040/Gwanbase" target="_blank" rel="noopener">GitHub</a>
+</header>
+<main>
+  <aside>
+    <h2>스키마</h2>
+    <div id="schema"></div>
+    <button class="danger" id="reset">초기화</button>
+  </aside>
+  <section>
+    <textarea id="sql" aria-label="SQL 입력" spellcheck="false" placeholder="SELECT * FROM users;  (Ctrl/Cmd+Enter로 실행)"></textarea>
+    <div class="row">
+      <button class="primary" id="run">실행</button>
+      <span class="badge" id="txn" aria-live="polite">I</span>
+      <span class="examples row" id="examples"></span>
+    </div>
+    <div id="history"></div>
+  </section>
+</main>
+<script>
+const EXAMPLES = [
+  ['SELECT', 'SELECT * FROM users WHERE age > 28 ORDER BY age'],
+  ['JOIN', 'SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id WHERE o.amount > 100'],
+  ['EXPLAIN', 'EXPLAIN SELECT * FROM orders WHERE user_id = 3'],
+  ['INSERT', "INSERT INTO users (id, name, age) VALUES (6, 'Frank', 52)"],
+  ['UPDATE', 'UPDATE orders SET amount = amount + 10 WHERE user_id = 1'],
+  ['BEGIN', 'BEGIN'],
+  ['ROLLBACK', 'ROLLBACK'],
+  ['UNIQUE 위반', "INSERT INTO users (id, name, age) VALUES (1, 'Dup', 1)"],
+  ['FK 위반', 'INSERT INTO orders (id, user_id, amount) VALUES (9, 999, 1)'],
+];
+const $ = (id) => document.getElementById(id);
+const sqlBox = $('sql'), history = $('history'), txnBadge = $('txn');
+
+for (const [label, sql] of EXAMPLES) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.onclick = () => { sqlBox.value = sql; sqlBox.focus(); };
+  $('examples').appendChild(b);
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function renderTable(columns, rows) {
+  const t = el('table', 'result');
+  const head = t.createTHead().insertRow();
+  for (const c of columns) head.appendChild(el('th', '', c));
+  const body = t.createTBody();
+  for (const r of rows) {
+    const tr = body.insertRow();
+    for (const v of r) {
+      const td = el('td', v === null ? 'null' : '', v === null ? 'NULL' : String(v));
+      tr.appendChild(td);
+    }
+  }
+  return t;
+}
+
+function setTxn(txn) { txnBadge.textContent = txn; txnBadge.className = 'badge ' + txn; }
+
+async function loadSchema() {
+  const res = await fetch('/schema');
+  const data = await res.json();
+  const box = $('schema');
+  box.textContent = '';
+  for (const t of data.tables) {
+    const d = el('div', 'table');
+    d.appendChild(el('b', '', t.name));
+    const ul = el('ul');
+    for (const c of t.columns) ul.appendChild(el('li', '', `${c.name} ${c.type}${c.nullable ? '' : ' NOT NULL'}`));
+    for (const i of t.indexes) ul.appendChild(el('li', 'idx', `${i.unique ? 'UNIQUE ' : ''}INDEX ${i.name} (${i.column})`));
+    d.appendChild(ul);
+    box.appendChild(d);
+  }
+}
+
+async function run() {
+  const sql = sqlBox.value.trim();
+  if (!sql) return;
+  const res = await fetch('/query', { method: 'POST', body: sql });
+  const data = await res.json();
+  const entry = el('div', 'entry');
+  entry.appendChild(el('pre', '', sql));
+  const meta = el('div', 'meta');
+  if (data.error) {
+    meta.appendChild(el('span', 'error', `ERROR [${data.sqlState}] ${data.error}`));
+  } else if (data.columns) {
+    meta.appendChild(el('span', '', `${data.count}행${data.truncated ? ` (앞 ${data.rows.length}행만 표시)` : ''}`));
+  } else if (data.count !== undefined) {
+    meta.appendChild(el('span', '', `${data.kind.toUpperCase()} ${data.count}`));
+  } else {
+    meta.appendChild(el('span', '', data.message));
+  }
+  const badge = el('span', 'badge ' + data.txn, data.txn);
+  meta.appendChild(badge);
+  entry.appendChild(meta);
+  if (data.columns) entry.appendChild(renderTable(data.columns, data.rows));
+  history.appendChild(entry);
+  entry.scrollIntoView({ block: 'end' });
+  setTxn(data.txn);
+  if (!data.error && !data.columns) loadSchema();
+}
+
+$('run').onclick = run;
+sqlBox.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') run(); });
+$('reset').onclick = async () => {
+  if (!confirm('모든 방문자의 데이터를 지우고 샘플 상태로 되돌립니다. 계속할까요?')) return;
+  await fetch('/reset', { method: 'POST' });
+  history.textContent = '';
+  setTxn('I');
+  loadSchema();
+};
+loadSchema();
+</script>
+</body>
+</html>

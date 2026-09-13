@@ -8,6 +8,8 @@ Kotlin으로 관계형 데이터베이스를 밑바닥부터 만들어보는 프
 8개 Phase를 모두 완료했다. `psql`이나 JDBC 드라이버로 접속해서 SQL을 실행할 수 있다.
 이후로는 [고도화 로드맵](docs/specs/advanced.md)을 따라 PostgreSQL internals에 가깝게 확장 중이다.
 
+브라우저에서 바로 써볼 수 있다: **[Playground](https://gwanbase-playground.fly.dev)** (모든 방문자가 DB 하나를 공유하며, 재시작 시 초기화된다. 동시 쓰기 시 DB가 손상될 수 있으며 "초기화"로 복구한다)
+
 | Phase | 내용 | 태그 |
 |---|---|---|
 | 0 | 프로젝트 세팅 | — |
