@@ -14,7 +14,9 @@ import gwanbase.wal.TransactionContext
 import gwanbase.wal.WalCallbackImpl
 import java.nio.ByteOrder
 import java.nio.file.Path
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantReadWriteLock
 
 /**
  * Phase 2 데이터베이스 진입점.
@@ -39,6 +41,13 @@ class Database private constructor(
     internal val nextTxnId = AtomicInteger(0)
     internal val lockManager = LockManager()
     internal val currentTxnHolder = ThreadLocal<TransactionContext?>()
+
+    /**
+     * 인덱스 루트 페이지 ID → 트리 래치. [BPlusTree]는 호출마다 새로 만들어지므로
+     * 같은 인덱스를 가리키는 인스턴스가 하나의 래치를 공유하도록 여기서 관리한다.
+     * PostgreSQL이 relation OID로 락을 식별하는 것과 같은 역할이다.
+     */
+    private val indexLatches = ConcurrentHashMap<Int, ReentrantReadWriteLock>()
 
     companion object {
         const val METADATA_PAGE_ID = 0
@@ -209,10 +218,11 @@ class Database private constructor(
 
     // ── 인덱스 관리 ──
 
-    /** 인덱스 메타데이터로 B+Tree를 반환한다. */
+    /** 인덱스 메타데이터로 B+Tree를 반환한다. 같은 인덱스의 트리는 래치를 공유한다. */
     fun getIndexTree(indexInfo: IndexInfo): BPlusTree {
         checkOpen()
-        return BPlusTree(bpm, indexInfo.rootPageId)
+        val latch = indexLatches.computeIfAbsent(indexInfo.rootPageId) { ReentrantReadWriteLock() }
+        return BPlusTree(bpm, indexInfo.rootPageId, latch)
     }
 
     /**
@@ -282,7 +292,7 @@ class Database private constructor(
         require(indexInfo.unique) { "인덱스 '${indexInfo.name}'은 유일 인덱스가 아니다" }
         val schema = catalog.getTable(indexInfo.tableName)!!.schema
         val colType = schema.column(schema.columnIndex(indexInfo.columnName)).type
-        val tree = BPlusTree(bpm, indexInfo.rootPageId)
+        val tree = getIndexTree(indexInfo)
         return findRidByColumnKey(tree, KeySerializer.serializeKey(value, colType), selfRid = null)
     }
 
@@ -300,7 +310,7 @@ class Database private constructor(
         val colType = info.schema.column(colIndex).type
         val index = catalog.getIndexesForTable(tableName).firstOrNull { it.columnName == columnName }
         if (index != null) {
-            val tree = BPlusTree(bpm, index.rootPageId)
+            val tree = getIndexTree(index)
             return findRidByColumnKey(tree, KeySerializer.serializeKey(value, colType), excludeRid) != null
         }
         val iter = scanTable(tableName)
@@ -384,7 +394,7 @@ class Database private constructor(
             val colType = schema.column(colIndex).type
             val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
             val columnKey = KeySerializer.serializeKey(value, colType)
-            val tree = BPlusTree(bpm, indexInfo.rootPageId)
+            val tree = getIndexTree(indexInfo)
             findRidByColumnKey(tree, columnKey, selfRid)?.let {
                 throw UniqueViolationException(indexInfo.name, it)
             }
@@ -393,8 +403,9 @@ class Database private constructor(
 
     /** [columnKey]와 같은 컬럼 값을 가진 엔트리 중 [selfRid]가 아닌 첫 RID를 반환한다. 없으면 null. */
     private fun findRidByColumnKey(tree: BPlusTree, columnKey: ByteArray, selfRid: RID?): RID? {
-        // 검사와 삽입 사이에 다른 스레드가 끼어들 수 있다. B+Tree 자체가 아직 동시 쓰기에
-        // 안전하지 않으므로 같은 한계로 두고, B+Tree 래치 도입 시 함께 해결한다.
+        // 검사와 삽입 사이에 다른 스레드가 끼어들 수 있다. B+Tree 래치는 트리 구조만 보호하고
+        // 검사–힙 삽입–인덱스 삽입을 하나로 묶지는 않는다. 커밋된 충돌은
+        // DatabaseSession.waitForConflictingRow가 재시도로 흡수한다 (advanced.md 20·26번).
         // equalityScanEnd가 null이면 columnKey가 컬럼 타입의 최대값(전부 0xFF)이라는 뜻이다.
         // 이 값은 그 인덱스에서 가능한 가장 큰 컬럼 값이므로 트리에 남은 모든 키가 같은
         // columnKey 접두사를 공유한다 — 상한 없이 끝까지 스캔해도 정확하다.
@@ -412,7 +423,7 @@ class Database private constructor(
             val colIndex = schema.columnIndex(indexInfo.columnName)
             val colType = schema.column(colIndex).type
             val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
-            val tree = BPlusTree(bpm, indexInfo.rootPageId)
+            val tree = getIndexTree(indexInfo)
             val columnKey = KeySerializer.serializeKey(value, colType)
             tree.insert(KeySerializer.compositeKey(columnKey, rid), KeySerializer.serializeRid(rid))
         }
@@ -424,7 +435,7 @@ class Database private constructor(
             val colIndex = schema.columnIndex(indexInfo.columnName)
             val colType = schema.column(colIndex).type
             val value = ExpressionEvaluator.getTupleValue(tuple, colIndex, colType) ?: continue
-            val tree = BPlusTree(bpm, indexInfo.rootPageId)
+            val tree = getIndexTree(indexInfo)
             val columnKey = KeySerializer.serializeKey(value, colType)
             tree.delete(KeySerializer.compositeKey(columnKey, rid))
         }

@@ -351,4 +351,37 @@ class DatabaseTest {
             e.conflictingRid shouldBe rid
         }
     }
+    @Test
+    fun `getIndexTree가 돌려주는 트리는 여러 스레드가 동시에 삽입해도 같은 래치를 공유한다`() {
+        Database.open(dbPath()).use { db ->
+            db.createTable("users", emailSchema)
+            db.createIndex("idx_id", "users", "id")
+            val indexInfo = db.getCatalog().getIndex("idx_id")!!
+
+            val threads = 4
+            val perThread = 500
+            val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+            val workers = (0 until threads).map { t ->
+                Thread {
+                    try {
+                        // 스레드마다 getIndexTree를 따로 호출해 별개 인스턴스가 같은 래치를 쓰는지 본다
+                        val tree = db.getIndexTree(indexInfo)
+                        for (i in t until threads * perThread step threads) {
+                            val rid = RID(0, i)
+                            val key = KeySerializer.compositeKey(KeySerializer.serializeKey(i, DataType.INT32), rid)
+                            tree.insert(key, KeySerializer.serializeRid(rid))
+                        }
+                    } catch (e: Throwable) {
+                        failures.add(e)
+                    }
+                }
+            }
+            workers.forEach { it.start() }
+            workers.forEach { it.join(30_000) }
+            failures shouldHaveSize 0
+
+            val entries = db.getIndexTree(indexInfo).scan(ByteArray(0), null).asSequence().toList()
+            entries shouldHaveSize threads * perThread
+        }
+    }
 }

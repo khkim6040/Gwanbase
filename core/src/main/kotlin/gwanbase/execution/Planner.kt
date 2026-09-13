@@ -1,6 +1,5 @@
 package gwanbase.execution
 
-import gwanbase.index.BPlusTree
 import gwanbase.index.KeyRange
 import gwanbase.index.KeySerializer
 import gwanbase.optimizer.PlanNode
@@ -52,7 +51,7 @@ class Planner(
         is PlanNode.IndexScan -> {
             val tableInfo = database.getTable(plan.tableName)!!
             val indexInfo = database.getCatalog().getIndex(plan.indexName)!!
-            val tree = BPlusTree(database.bpm, indexInfo.rootPageId)
+            val tree = database.getIndexTree(indexInfo)
             val schema = tableInfo.schema
             val colIndex = schema.columnIndex(plan.indexColumnName)
             val colType = schema.column(colIndex).type

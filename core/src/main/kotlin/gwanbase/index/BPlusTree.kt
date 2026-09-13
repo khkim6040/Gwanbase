@@ -1,22 +1,36 @@
 package gwanbase.index
 
 import gwanbase.storage.BufferPoolManager
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 /**
  * 디스크 기반 B+Tree 인덱스.
  *
  * 모든 페이지 접근은 [BufferPoolManager]를 통해 이루어진다.
- * split과 root promotion, 다단계 트리 탐색을 지원한다. delete(lazy)와
- * 범위 scan은 후속 TDD 사이클에서 추가된다.
+ * split과 root promotion, 다단계 트리 탐색, lazy delete, 범위 scan을 지원한다.
  *
- * 동시성은 Phase 1 범위 밖이다 (단일 스레드 가정).
+ * **동시성**: 트리 하나에 [ReentrantReadWriteLock] 하나를 둔다. [insert]/[delete]는
+ * write 래치를, [search]와 [scan]의 리프 한 장 읽기는 read 래치를 잡는다.
+ * PostgreSQL은 Lehman & Yao 방식으로 페이지 단위 래치를 잡고 split 중인 페이지는
+ * right-link로 따라가며, 잠금 결합(latch coupling)으로 루트 병목을 피한다.
+ * Gwanbase는 인덱스당 쓰기 처리량보다 정확성이 우선이라 트리 단위 락으로 시작한다
+ * (ponytail: 트리 단위 RW 락, 쓰기 경합이 문제가 되면 latch crabbing으로 교체).
+ * - https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/README
+ *
+ * 같은 트리를 가리키는 인스턴스는 반드시 같은 [latch]를 공유해야 한다. 래치는
+ * 트리 연산 안에서만 잡히고 [scan]도 yield 전에 놓으므로, 호출자가 행 잠금을
+ * 기다리는 동안 래치를 쥐는 일은 없다.
  *
  * @param bpm 페이지 I/O를 담당하는 버퍼 풀 매니저
  * @param initialRootPageId 루트 노드가 위치한 페이지 ID
+ * @param latch 트리 단위 RW 래치. 같은 루트를 가리키는 인스턴스끼리 공유한다
  */
 class BPlusTree internal constructor(
     private val bpm: BufferPoolManager,
     initialRootPageId: Int,
+    private val latch: ReentrantReadWriteLock = ReentrantReadWriteLock(),
 ) {
 
     /** 루트 페이지 ID. 루트 split 시에도 바뀌지 않는다 ([createNewRoot] 참조). */
@@ -26,21 +40,13 @@ class BPlusTree internal constructor(
      * 주어진 [key]에 해당하는 값을 반환한다.
      * 키가 존재하지 않으면 null을 반환한다.
      */
-    fun search(key: ByteArray): ByteArray? {
-        var pageId = rootPageId
-        while (true) {
-            val page = bpm.fetchPage(pageId) ?: error("page not found: $pageId")
-            val nextPageId: Int
-            try {
-                val node = BPlusTreeNode(page.data)
-                if (node.isLeaf) {
-                    return node.findValue(key)
-                }
-                nextPageId = node.findChild(key)
-            } finally {
-                bpm.unpinPage(pageId, isDirty = false)
-            }
-            pageId = nextPageId
+    fun search(key: ByteArray): ByteArray? = latch.read {
+        val leafId = findLeafPath(key).last()
+        val page = bpm.fetchPage(leafId) ?: error("leaf not found: $leafId")
+        try {
+            BPlusTreeNode(page.data).findValue(key)
+        } finally {
+            bpm.unpinPage(leafId, isDirty = false)
         }
     }
 
@@ -51,7 +57,7 @@ class BPlusTree internal constructor(
      * 전파된다. 부모도 가득 차면 재귀적으로 split이 일어나며, 루트까지 도달
      * 하면 새 내부 노드 루트가 생성된다.
      */
-    fun insert(key: ByteArray, value: ByteArray) {
+    fun insert(key: ByteArray, value: ByteArray): Unit = latch.write {
         val path = findLeafPath(key)
         val leafPageId = path.removeAt(path.size - 1)
 
@@ -63,7 +69,7 @@ class BPlusTree internal constructor(
 
             if (leaf.insertLeafEntry(key, value)) {
                 leafDirty = true
-                return
+                return@write
             }
 
             // 리프 가득 — split 후 새 엔트리를 올바른 절반에 삽입
@@ -87,26 +93,18 @@ class BPlusTree internal constructor(
      * [endKey]가 null이면 상한 없이 리프 체인 끝까지 반환한다.
      *
      * 구현은 leaf 체인을 따라가며 조건을 만족하는 엔트리만 lazy 하게 내보낸다.
-     * 각 leaf 단위로는 모든 엔트리를 힙 메모리에 복사해 가면서 페이지를
-     * 즉시 unpin 한다 (scan 도중 긴 pin 유지 방지).
+     * 각 leaf 단위로는 read 래치 안에서 모든 엔트리를 힙 메모리에 복사한 뒤 페이지를
+     * 즉시 unpin 하고 래치도 놓는다 (scan 도중 긴 pin/래치 유지 방지). 리프 페이지는
+     * merge·해제되지 않으므로 래치를 놓았다 다시 잡아도 `nextLeafPageId`는 유효하다.
+     * 래치를 놓은 사이 끼어든 삽입은 빠질 수 있는데(phantom), predicate lock이 없는
+     * 현재 Strict 2PL의 격리 수준과 같다.
      */
     fun scan(startKey: ByteArray, endKey: ByteArray?): Iterator<Pair<ByteArray, ByteArray>> {
         return sequence {
-            val path = findLeafPath(startKey)
-            var currentLeafId = path.last()
+            var currentLeafId = latch.read { findLeafPath(startKey).last() }
 
             while (currentLeafId != BPlusTreeNode.INVALID_PAGE_ID) {
-                val page = bpm.fetchPage(currentLeafId) ?: error("leaf not found: $currentLeafId")
-                val entries: List<Pair<ByteArray, ByteArray>>
-                val nextLeaf: Int
-                try {
-                    val leaf = BPlusTreeNode(page.data)
-                    check(leaf.isLeaf) { "scan 중 내부 노드를 만났다: $currentLeafId" }
-                    entries = leaf.leafEntries()
-                    nextLeaf = leaf.nextLeafPageId
-                } finally {
-                    bpm.unpinPage(currentLeafId, isDirty = false)
-                }
+                val (entries, nextLeaf) = latch.read { readLeaf(currentLeafId) }
 
                 for ((k, v) in entries) {
                     if (compareUnsigned(k, startKey) < 0) continue
@@ -118,6 +116,18 @@ class BPlusTree internal constructor(
         }.iterator()
     }
 
+    /** 리프 [leafPageId]의 엔트리 전체와 다음 리프 ID를 복사해 반환한다. read 래치 안에서 호출한다. */
+    private fun readLeaf(leafPageId: Int): Pair<List<Pair<ByteArray, ByteArray>>, Int> {
+        val page = bpm.fetchPage(leafPageId) ?: error("leaf not found: $leafPageId")
+        try {
+            val leaf = BPlusTreeNode(page.data)
+            check(leaf.isLeaf) { "scan 중 내부 노드를 만났다: $leafPageId" }
+            return leaf.leafEntries() to leaf.nextLeafPageId
+        } finally {
+            bpm.unpinPage(leafPageId, isDirty = false)
+        }
+    }
+
     /**
      * [key]를 제거한다 (Phase 1 lazy delete).
      *
@@ -126,7 +136,7 @@ class BPlusTree internal constructor(
      *
      * @return 키가 존재하여 제거되었으면 true, 없었으면 false
      */
-    fun delete(key: ByteArray): Boolean {
+    fun delete(key: ByteArray): Boolean = latch.write {
         val path = findLeafPath(key)
         val leafPageId = path.last()
 
@@ -137,7 +147,7 @@ class BPlusTree internal constructor(
             check(leaf.isLeaf) { "탐색 결과가 리프가 아니다: $leafPageId" }
             val removed = leaf.deleteLeafEntry(key)
             dirty = removed
-            return removed
+            return@write removed
         } finally {
             bpm.unpinPage(leafPageId, isDirty = dirty)
         }
