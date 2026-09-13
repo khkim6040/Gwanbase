@@ -43,11 +43,19 @@ class Database private constructor(
     internal val currentTxnHolder = ThreadLocal<TransactionContext?>()
 
     /**
-     * 인덱스 루트 페이지 ID → 트리 래치. [BPlusTree]는 호출마다 새로 만들어지므로
-     * 같은 인덱스를 가리키는 인스턴스가 하나의 래치를 공유하도록 여기서 관리한다.
+     * 앵커 페이지 ID(힙 헤더 또는 인덱스 루트) → 파일 래치. [HeapFile]과 [BPlusTree]는
+     * 호출마다 새로 만들어지므로 같은 파일을 가리키는 인스턴스가 하나의 래치를 공유하도록
+     * 여기서 관리한다. 헤더/루트 페이지 ID는 서로 겹치지 않으므로 맵 하나로 충분하다.
      * PostgreSQL이 relation OID로 락을 식별하는 것과 같은 역할이다.
      */
-    private val indexLatches = ConcurrentHashMap<Int, ReentrantReadWriteLock>()
+    private val fileLatches = ConcurrentHashMap<Int, ReentrantReadWriteLock>()
+
+    /** 테이블의 힙 파일을 반환한다. 같은 테이블의 힙 파일은 래치를 공유한다. */
+    private fun heapFileOf(info: TableInfo): HeapFile =
+        HeapFile(bpm, info.heapFileFirstPageId, latchFor(info.heapFileFirstPageId))
+
+    private fun latchFor(anchorPageId: Int): ReentrantReadWriteLock =
+        fileLatches.computeIfAbsent(anchorPageId) { ReentrantReadWriteLock() }
 
     companion object {
         const val METADATA_PAGE_ID = 0
@@ -167,7 +175,7 @@ class Database private constructor(
         val info = catalog.getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
         checkUniqueConstraints(tableName, info.schema, tuple, selfRid = null)
-        val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
+        val heapFile = heapFileOf(info)
         val rid = heapFile.insertTuple(tuple.serialize())
         maintainIndexesOnInsert(tableName, info.schema, tuple, rid)
         catalog.incrementRowCount(tableName)
@@ -179,7 +187,7 @@ class Database private constructor(
         checkOpen()
         val info = catalog.getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
-        val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
+        val heapFile = heapFileOf(info)
         val data = heapFile.getTuple(rid) ?: return null
         return Tuple.deserialize(info.schema, data)
     }
@@ -191,7 +199,7 @@ class Database private constructor(
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
         // 삭제 전에 튜플을 읽어 인덱스 정리에 사용한다
         val tuple = getTuple(tableName, rid)
-        val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
+        val heapFile = heapFileOf(info)
         val deleted = heapFile.deleteTuple(rid)
         if (deleted && tuple != null) {
             maintainIndexesOnDelete(tableName, info.schema, tuple, rid)
@@ -205,7 +213,7 @@ class Database private constructor(
         checkOpen()
         val info = catalog.getTable(tableName)
             ?: throw IllegalArgumentException("테이블 '$tableName'이 존재하지 않는다")
-        val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
+        val heapFile = heapFileOf(info)
         val rawIter = heapFile.scan()
         return object : Iterator<Pair<RID, Tuple>> {
             override fun hasNext() = rawIter.hasNext()
@@ -221,8 +229,7 @@ class Database private constructor(
     /** 인덱스 메타데이터로 B+Tree를 반환한다. 같은 인덱스의 트리는 래치를 공유한다. */
     fun getIndexTree(indexInfo: IndexInfo): BPlusTree {
         checkOpen()
-        val latch = indexLatches.computeIfAbsent(indexInfo.rootPageId) { ReentrantReadWriteLock() }
-        return BPlusTree(bpm, indexInfo.rootPageId, latch)
+        return BPlusTree(bpm, indexInfo.rootPageId, latchFor(indexInfo.rootPageId))
     }
 
     /**
@@ -276,7 +283,7 @@ class Database private constructor(
         // 이전 튜플을 읽어 인덱스 정리에 사용한다
         val oldTuple = getTuple(tableName, rid)
         checkUniqueConstraints(tableName, info.schema, tuple, selfRid = rid)
-        val heapFile = HeapFile(bpm, info.heapFileFirstPageId)
+        val heapFile = heapFileOf(info)
         val newRid = heapFile.updateTuple(rid, tuple.serialize())
         // 인덱스 유지보수: 이전 키 제거 후 새 키 삽입
         if (oldTuple != null) {

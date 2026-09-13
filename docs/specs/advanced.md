@@ -573,11 +573,11 @@ UPDATE/DELETE 스캔은 잠금 없이 수행되고 변경 시점에 X 잠금을 
 | 항목 | 구현 | PostgreSQL과의 차이 | 이유 |
 |------|------|---------------------|------|
 | 락 단위 | 트리 하나에 `ReentrantReadWriteLock` 하나. `insert`/`delete`는 write, `search`/`scan`은 read | 페이지 단위 락 + right-link 대신 트리 단위 | 정확성 우선. 인덱스당 쓰기가 직렬화되지만 행 잠금(Strict 2PL)이 이미 같은 행의 동시 수정을 막고 있어 실효 병렬도 손실은 작다. latch crabbing은 후속 항목 |
-| 래치 식별 | `Database.indexLatches: ConcurrentHashMap<rootPageId, RWLock>`. `getIndexTree()`가 같은 루트면 같은 래치를 넘긴다 | PG는 relation OID로 락을 식별 | `BPlusTree` 인스턴스가 호출마다 새로 만들어지는 기존 구조를 유지하면서 래치만 공유 |
+| 래치 식별 | `Database.fileLatches: ConcurrentHashMap<anchorPageId, RWLock>`. `getIndexTree()`가 같은 루트면 같은 래치를 넘긴다 (27번에서 힙 파일도 같은 맵을 쓰도록 일반화) | PG는 relation OID로 락을 식별 | `BPlusTree` 인스턴스가 호출마다 새로 만들어지는 기존 구조를 유지하면서 래치만 공유 |
 | scan | 리프 한 장을 read 래치 안에서 복사한 뒤 래치를 놓고 yield. 다음 리프는 `nextLeafPageId`로 다시 잡는다 | PG도 페이지 단위로 락을 잡았다 놓는다 | scan 전체에 래치를 걸면 `IndexScanOperator.next()`가 행 잠금을 기다리는 동안 래치를 쥐어, 쓰기 세션과 `LockManager` 감지 밖의 데드락이 생긴다. 리프 페이지는 merge·해제되지 않아 놓았다 다시 잡아도 포인터가 유효하다 |
 | phantom | 래치를 놓은 사이 끼어든 삽입은 scan에 빠질 수 있다 | PG는 격리 수준에 따라 다름 | predicate lock이 없는 현재 Strict 2PL의 격리 수준과 같다. 23번(Serialization Failure)에서 다룬다 |
 | 검사–삽입 원자성 | 여전히 보장하지 않음 (`Database.findRidByColumnKey` 주석) | PG는 `_bt_check_unique`가 인덱스 락 안에서 검사+삽입 | 힙 삽입까지 한 래치로 묶어야 해 인덱스당 INSERT 처리량이 1로 떨어진다. `waitForConflictingRow`가 커밋 후 충돌을 흡수하므로 별도 항목으로 미룬다 |
-| HeapFile | 미해결 | — | 같은 성격의 문제지만 힙은 페이지 단위 락이 자연스러워 별도 항목으로 둔다 |
+| HeapFile | 27번에서 파일 단위 RW 래치로 해결 | — | 같은 성격의 문제지만 잠금 순서가 달라 별도 항목으로 뒀다 |
 
 **참고 자료**
 
@@ -586,6 +586,38 @@ UPDATE/DELETE 스캔은 잠금 없이 수행되고 변경 시점에 X 잠금을 
 - [`src/backend/access/nbtree/nbtinsert.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/nbtree/nbtinsert.c) — `_bt_doinsert()`, `_bt_split()`
 - [PostgreSQL 문서: 13.3.1 Table-Level Locks](https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-TABLES) — relation-level 락 모드
 - Lehman, P. L., Yao, S. B. (1981). *Efficient Locking for Concurrent Operations on B-Trees*. ACM TODS 6(4)
+
+### 27. HeapFile 쓰기 동기화 ✅
+
+`HeapFile.insertTuple`은 헤더 페이지의 free-list 헤드와 데이터 페이지 배열을
+read-modify-write하고, `HeapPage.insertRecord`/`deleteRecord`는 슬롯 디렉터리를 잠금
+없이 고쳤다. 두 세션이 동시에 INSERT하면 (1) 같은 페이지의 슬롯이 겹치고
+(2) `appendDataPageId`의 `count++`가 유실돼 삽입된 행이 scan에서 영영 안 보였다.
+`updateTuple`만 `Page.writeLatch`를 써서 일관성도 없었다.
+
+**PostgreSQL 방식**
+
+- 페이지 단위 buffer content lock. 튜플을 넣을 페이지를 잠근 뒤 여유 공간을 다시
+  확인하고, 부족하면 잠금을 풀고 다른 페이지로 넘어간다 (`RelationGetBufferForTuple`).
+- 빈 공간 탐색은 FSM(free space map)이라는 별도 fork가 담당하며, FSM의 값은 힌트일
+  뿐이라 페이지를 잠근 뒤 재확인이 필수다.
+- 새 페이지 추가는 relation extension lock으로 직렬화한다.
+
+**Gwanbase 구현**
+
+| 항목 | 구현 | PostgreSQL과의 차이 | 이유 |
+|------|------|---------------------|------|
+| 락 단위 | 힙 파일 하나에 `ReentrantReadWriteLock` 하나. `insertTuple`/`deleteTuple`/`updateTuple`은 write, `getTuple`은 read | 페이지 단위 락 + FSM + extension lock 대신 파일(테이블) 단위 | insert는 헤더→데이터 페이지, delete의 free-list 등록은 데이터 페이지→헤더 순으로 잠가 순서가 반대다. 페이지 단위로 가려면 PG처럼 "잠금 해제 후 재확인" 루프가 필요해 정확성 우선으로 파일 단위에서 시작한다. 임계 구역은 페이지 연산 한 번이라 트랜잭션 길이와 무관하다 |
+| 래치 식별 | `Database.fileLatches`를 앵커 페이지 ID(힙 헤더 또는 인덱스 루트) → 래치로 일반화. `heapFileOf(info)`가 같은 헤더면 같은 래치를 넘긴다 | PG는 relation OID로 락을 식별 | 헤더/루트 페이지 ID는 서로 겹치지 않으므로 26번 맵을 그대로 쓴다 |
+| scan | 헤더의 페이지 ID 배열 읽기와 데이터 페이지 한 장 복사를 각각 read 래치 안에서 하고 놓는다 | PG도 페이지 단위로 락을 잡았다 놓는다 | 26번 B+Tree scan과 같은 이유 — 래치를 쥔 채 행 잠금을 기다리면 쓰기 세션과 데드락 |
+| updateTuple | `page.writeLatch` 제거 | — | 파일 래치가 흡수한다. 두 계층의 락이 섞이면 순서 추론이 어려워진다 |
+
+**참고 자료**
+
+- [`src/backend/access/heap/hio.c`](https://github.com/postgres/postgres/blob/master/src/backend/access/heap/hio.c) — `RelationGetBufferForTuple()`: 페이지 잠금 후 여유 공간 재확인, extension lock
+- [`src/backend/storage/freespace/README`](https://github.com/postgres/postgres/blob/master/src/backend/storage/freespace/README) — FSM 구조와 "값은 힌트" 원칙
+- [`src/backend/storage/buffer/README`](https://github.com/postgres/postgres/blob/master/src/backend/storage/buffer/README) — "Buffer content locks"
+- [PostgreSQL 문서: 65.3 Free Space Map](https://www.postgresql.org/docs/current/storage-fsm.html)
 
 ---
 
@@ -640,6 +672,7 @@ UPDATE/DELETE 스캔은 잠금 없이 수행되고 변경 시점에 X 잠금을 
 | 2 | 영향 행 수 ✅ (24번) | command tag 정확성, 낮은 비용 |
 | 3 | UPDATE/DELETE predicate recheck ✅ (25번) | 잠금 후 바뀐 행에 WHERE 재평가 (PG EvalPlanQual) |
 | 4 | B+Tree 쓰기 동기화 ✅ (26번) | 트리 단위 RW 락. latch crabbing은 이후 |
+| 5 | HeapFile 쓰기 동기화 ✅ (27번) | 파일 단위 RW 락. 페이지 단위 락 + FSM은 이후 |
 
 ## 참고 자료
 

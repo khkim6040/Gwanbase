@@ -189,4 +189,32 @@ class HeapFileTest {
 
         dm.close()
     }
+
+    @Test
+    fun `여러 스레드가 동시에 삽입해도 scan 건수와 RID별 조회가 모두 일치한다`() {
+        val (heapFile, _) = createHeapFile()
+        val threads = 4
+        val perThread = 500
+        val rids = java.util.concurrent.ConcurrentHashMap<RID, ByteArray>()
+        val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+        val workers = (0 until threads).map { t ->
+            Thread {
+                try {
+                    for (i in t until threads * perThread step threads) {
+                        val data = "record-%05d".format(i).toByteArray()
+                        rids[heapFile.insertTuple(data)] = data
+                    }
+                } catch (e: Throwable) {
+                    failures.add(e)
+                }
+            }
+        }
+        workers.forEach { it.start() }
+        workers.forEach { it.join(30_000) }
+        failures shouldHaveSize 0
+
+        rids.size shouldBe threads * perThread
+        rids.forEach { (rid, data) -> heapFile.getTuple(rid) shouldBe data }
+        heapFile.scan().asSequence().toList() shouldHaveSize threads * perThread
+    }
 }
