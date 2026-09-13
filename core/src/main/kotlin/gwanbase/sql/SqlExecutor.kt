@@ -250,6 +250,7 @@ class SqlExecutor(
         }
 
         val checkRow = rowConstraintChecker(stmt.tableName, schema)
+        var updated = 0
         for ((rid, _) in matches) {
             // X 잠금 획득 후 최신 튜플을 다시 읽어 Lost Update를 방지한다.
             // 잠금 없이 스캔한 튜플은 stale할 수 있으므로, 잠금 획득 후 재조회한다.
@@ -273,9 +274,11 @@ class SqlExecutor(
             } else {
                 database.updateTuple(stmt.tableName, rid, newTuple)
             }
+            updated++
         }
 
-        return ExecuteResult.Updated(matches.size)
+        // 잠금 대기 중 다른 트랜잭션이 지운 행(재조회 실패)은 세지 않는다.
+        return ExecuteResult.Updated(updated)
     }
 
     /**
@@ -299,6 +302,7 @@ class SqlExecutor(
         }
 
         val referenced = database.getCatalog().getForeignKeysReferencing(stmt.tableName).isNotEmpty()
+        var deleted = 0
         for (rid in toDelete) {
             if (referenced) {
                 // 부모 X 잠금을 먼저 잡아야 자식 삽입(부모 S 잠금)과 직렬화된다
@@ -306,11 +310,13 @@ class SqlExecutor(
                 val tuple = database.getTuple(stmt.tableName, rid) ?: continue
                 checkNoReferencingRows(stmt.tableName, schema, tuple, null, rid)
             }
-            session?.deleteTupleWithLock(stmt.tableName, rid)
+            val removed = session?.deleteTupleWithLock(stmt.tableName, rid)
                 ?: database.deleteTuple(stmt.tableName, rid)
+            if (removed) deleted++
         }
 
-        return ExecuteResult.Deleted(toDelete.size)
+        // 잠금 대기 중 다른 트랜잭션이 이미 지운 슬롯은 deleteTuple이 false를 반환하므로 세지 않는다.
+        return ExecuteResult.Deleted(deleted)
     }
 
     // ── INSERT 전용 헬퍼 ──
