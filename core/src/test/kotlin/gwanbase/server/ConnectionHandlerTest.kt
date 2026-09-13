@@ -9,6 +9,7 @@ import gwanbase.table.ConstraintViolationException
 import gwanbase.table.UniqueViolationException
 import gwanbase.txn.DeadlockException
 import gwanbase.txn.LockTimeoutException
+import gwanbase.txn.TransactionAbortedException
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import org.junit.jupiter.api.AfterEach
@@ -194,6 +195,7 @@ class ConnectionHandlerTest {
         ConnectionHandler.sqlStateOf(ParseException("x", 0)) shouldBe "42601"
         ConnectionHandler.sqlStateOf(BindException("x")) shouldBe "42000"
         ConnectionHandler.sqlStateOf(DeadlockException(1)) shouldBe "40P01"
+        ConnectionHandler.sqlStateOf(TransactionAbortedException()) shouldBe "25P02"
         ConnectionHandler.sqlStateOf(DataException("x", "22012")) shouldBe "22012"
         ConnectionHandler.sqlStateOf(LockTimeoutException(1, 100)) shouldBe "55P03"
         ConnectionHandler.sqlStateOf(UniqueViolationException("t_pkey", RID(0, 0))) shouldBe "23505"
@@ -249,6 +251,39 @@ class ConnectionHandlerTest {
 
             sendQuery(out, "ROLLBACK")
             val rollbackMsgs = readUntilReady(reader)
+            (rollbackMsgs.last() as PgMessage.ReadyForQuery).txnStatus shouldBe 'I'
+
+            sendTerminate(out)
+        }
+        thread.join(3000)
+    }
+
+    @Test
+    fun `트랜잭션 중 실행 단계 오류(UNIQUE 위반) 후 ROLLBACK이 I로 돌아온다`() {
+        val (client, thread) = startHandler()
+        client.use { sock ->
+            val out = sock.getOutputStream()
+            val reader = PgMessageReader(sock.getInputStream())
+
+            sendStartup(out)
+            readUntilReady(reader)
+            sendQuery(out, "CREATE TABLE t (id INT PRIMARY KEY)")
+            readUntilReady(reader)
+            sendQuery(out, "INSERT INTO t (id) VALUES (1)")
+            readUntilReady(reader)
+
+            sendQuery(out, "BEGIN")
+            readUntilReady(reader)
+            sendQuery(out, "INSERT INTO t (id) VALUES (1)")
+            (readUntilReady(reader).last() as PgMessage.ReadyForQuery).txnStatus shouldBe 'E'
+
+            sendQuery(out, "SELECT * FROM t")
+            val rejected = readUntilReady(reader)
+            (rejected.first { it is PgMessage.ErrorResponse } as PgMessage.ErrorResponse).code shouldBe "25P02"
+
+            sendQuery(out, "ROLLBACK")
+            val rollbackMsgs = readUntilReady(reader)
+            rollbackMsgs.any { it is PgMessage.ErrorResponse } shouldBe false
             (rollbackMsgs.last() as PgMessage.ReadyForQuery).txnStatus shouldBe 'I'
 
             sendTerminate(out)
